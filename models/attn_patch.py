@@ -73,7 +73,7 @@ def entropy_attention_forward(
             temp_max=1.0,
             ema_beta=0.9,
             kp=0.35, # proportional gain
-            max_step=0.05,
+            max_step=0.0005,
         )
 
     controller = module._entropy_temp_controller

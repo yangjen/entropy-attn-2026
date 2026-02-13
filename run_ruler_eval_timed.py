@@ -14,7 +14,7 @@ CUDA_VISIBLE_DEVICES=3 python run_ruler_eval_timed.py \
   --time_skip 4 \
   --pred_name predictions_timed_scaled.jsonl
 
-  CUDA_VISIBLE_DEVICES=0 python run_ruler_eval_timed.py \
+  CUDA_VISIBLE_DEVICES=5 python run_ruler_eval_timed.py \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --data_root /c2/jenny/r3/RULER_outputs/llama3.1-8b-chat/synthetic/32768/data \
   --tasks qa_2 \
@@ -27,7 +27,7 @@ CUDA_VISIBLE_DEVICES=3 python run_ruler_eval_timed.py \
   --deterministic \
   --time \
   --time_skip 4 \
-  --pred_name predictions_timed_scaled.jsonl
+  --pred_name predictions_timed_scaled_debug_recovery.jsonl
 
 
 '''
@@ -507,7 +507,8 @@ def main():
         }
 
     tasks_tag = _safe_name(args.tasks)
-    summ_path = os.path.join(args.data_root, f"summary_{tasks_tag}_{args.attn_impl}_timed_scaled.json")
+    pred_stem = os.path.splitext(os.path.basename(args.pred_name))[0]
+    summ_path = os.path.join(args.data_root, f"summary_{tasks_tag}_{args.attn_impl}_{_safe_name(pred_stem)}.json")
     # summ_path = os.path.join(args.data_root, f"summary_{tasks_tag}_{args.attn_impl}_{args.dtype}.json")
 
     with open(summ_path, "w", encoding="utf-8") as f:
