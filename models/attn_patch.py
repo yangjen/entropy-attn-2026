@@ -4,6 +4,14 @@ from models.entropy_attn_triton import attention as entropy_attention
 from transformers.utils import logging
 from models.entropy_scaling import EntropyTempController
 
+"""
+-----Notes-----
+N_CTX > 1: prefill/prompt pass
+N_CTX == 1: decode step (one token at a time)
+
+"""
+
+
 logger = logging.get_logger(__name__)
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -79,8 +87,14 @@ def entropy_attention_forward(
 
     controller = module._entropy_temp_controller
 
-    # initialize controller state once
-    if controller.temp is None:
+    # New example starts with prefill (N_CTX > 1): reset dynamic state + target.
+    if N_CTX > 1:
+        if hasattr(controller, "reset_state"):
+            controller.reset_state(shape=(Z, H, 1), device=query.device, clear_target=True)
+        else:
+            controller._init_state((Z, H, 1), query.device)
+            controller.prompt_target_entropy = None
+    elif controller.temp is None:
         controller._init_state((Z, H, 1), query.device)
 
     temp = controller.temp.expand(Z, H, N_CTX)
@@ -93,7 +107,7 @@ def entropy_attention_forward(
     )
 
     # ---------- prompt entropy reference (prefill only) ----------
-    if N_CTX > 1 and controller.prompt_target_entropy is None:
+    if N_CTX > 1:
         kv_len = key.shape[2]
 
         H_norm = attn_entropy / torch.log(
@@ -104,8 +118,23 @@ def entropy_attention_forward(
         K = min(256, H_norm.shape[-1])
         tail = H_norm[:, :, -K:]              # [Z, H, K]
 
-        # use tail entropy mean as target
-        prompt_target = tail.mean(dim=-1, keepdim=True) 
+        # Use finite-only mean so NaN/Inf in tail do not poison target.
+        tail_finite = torch.isfinite(tail)
+        tail_safe = torch.where(tail_finite, tail, torch.zeros_like(tail))
+        tail_count = tail_finite.sum(dim=-1, keepdim=True)
+        tail_sum = tail_safe.sum(dim=-1, keepdim=True)
+
+        # Fallback for heads with no finite tail entries: use global finite tail mean.
+        global_count = tail_finite.sum()
+        if int(global_count.item()) > 0:
+            global_mean = tail_safe.sum() / global_count
+        else:
+            global_mean = torch.tensor(0.0, device=tail.device, dtype=tail.dtype)
+        prompt_target = torch.where(
+            tail_count > 0,
+            tail_sum / tail_count.clamp(min=1),
+            global_mean.expand_as(tail_sum),
+        )
         controller.set_prompt_target(prompt_target)
 
     # ---------- decode-time entropy feedback ----------
