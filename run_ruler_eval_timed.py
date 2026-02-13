@@ -5,14 +5,15 @@ CUDA_VISIBLE_DEVICES=3 python run_ruler_eval_timed.py \
   --tasks qa_1 \
   --max_new_tokens 64 \
   --compact \
-  --log_every 10 \
+  --status_every 10 \
   --eval_mode ruler_part \
   --attn_impl entropy_attn \
   --dtype bf16 \
   --deterministic \
   --time \
   --time_skip 4 \
-  --pred_name predictions_timed_scaled.jsonl
+  --max_step 0.0005 \
+  --run_tag predictions_timed_scaled.jsonl
 
   CUDA_VISIBLE_DEVICES=5 python run_ruler_eval_timed.py \
   --model meta-llama/Llama-3.1-8B-Instruct \
@@ -20,14 +21,15 @@ CUDA_VISIBLE_DEVICES=3 python run_ruler_eval_timed.py \
   --tasks qa_2 \
   --max_new_tokens 64 \
   --compact \
-  --log_every 10 \
+  --status_every 10 \
   --eval_mode ruler_part \
   --attn_impl entropy_attn \
   --dtype bf16 \
   --deterministic \
   --time \
   --time_skip 4 \
-  --pred_name predictions_timed_scaled_debug_recovery.jsonl
+  --max_step 0.0005 \
+  --run_tag predictions_timed_scaled_debug_recovery.jsonl
 
 
 '''
@@ -38,6 +40,7 @@ import re
 import string
 import argparse
 from typing import Dict, Any, List, Optional
+from contextlib import nullcontext
 
 import torch
 from attention_llama import LlamaRunner
@@ -97,50 +100,50 @@ def iter_jsonl(path: str):
             yield json.loads(line)
 
 
-def normalize_strict(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = re.sub(r"<\|.*?\|>", " ", s)
-    s = s.translate(_PUNCT_TABLE)
-    s = " ".join(s.split())
-    s = re.sub(r"^(the|a|an)\s+", "", s)
-    return s
+# def normalize_strict(s: str) -> str:
+#     s = (s or "").strip().lower()
+#     s = re.sub(r"<\|.*?\|>", " ", s)
+#     s = s.translate(_PUNCT_TABLE)
+#     s = " ".join(s.split())
+#     s = re.sub(r"^(the|a|an)\s+", "", s)
+#     return s
 
 
-def normalize_list(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = re.sub(r"<\|.*?\|>", " ", s)
-    s = s.translate(_PUNCT_NO_COMMA)
-    s = " ".join(s.split())
-    s = s.replace(" and ", ",")
-    return s
+# def normalize_list(s: str) -> str:
+#     s = (s or "").strip().lower()
+#     s = re.sub(r"<\|.*?\|>", " ", s)
+#     s = s.translate(_PUNCT_NO_COMMA)
+#     s = " ".join(s.split())
+#     s = s.replace(" and ", ",")
+#     return s
 
 
-def tokenize_items_list(s: str) -> List[str]:
-    s = normalize_list(s)
-    parts = [p.strip() for p in s.split(",") if p.strip()]
-    return parts
+# def tokenize_items_list(s: str) -> List[str]:
+#     s = normalize_list(s)
+#     parts = [p.strip() for p in s.split(",") if p.strip()]
+#     return parts
 
 
-def strict_em(pred: str, gold: str) -> bool:
-    return normalize_strict(pred) == normalize_strict(gold)
+# def strict_em(pred: str, gold: str) -> bool:
+#     return normalize_strict(pred) == normalize_strict(gold)
 
 
-def list_set_match(pred: str, gold: str) -> bool:
-    g = (gold or "").lower()
-    if ("," in g) or (" and " in g):
-        p_set = set(tokenize_items_list(pred))
-        g_set = set(tokenize_items_list(gold))
-        # Only apply if gold is actually a list-like answer
-        return (len(g_set) >= 2) and (p_set == g_set)
-    return False
+# def list_set_match(pred: str, gold: str) -> bool:
+#     g = (gold or "").lower()
+#     if ("," in g) or (" and " in g):
+#         p_set = set(tokenize_items_list(pred))
+#         g_set = set(tokenize_items_list(gold))
+#         # Only apply if gold is actually a list-like answer
+#         return (len(g_set) >= 2) and (p_set == g_set)
+#     return False
 
 
-def soft_contains(pred: str, gold: str) -> bool:
-    p = normalize_strict(pred)
-    g = normalize_strict(gold)
-    if not p or not g:
-        return False
-    return re.search(rf"\b{re.escape(g)}\b", p) is not None
+# def soft_contains(pred: str, gold: str) -> bool:
+#     p = normalize_strict(pred)
+#     g = normalize_strict(gold)
+#     if not p or not g:
+#         return False
+#     return re.search(rf"\b{re.escape(g)}\b", p) is not None
 
 
 def string_match_part(preds: List[str], refs: List[List[str]]) -> float:
@@ -161,30 +164,30 @@ def ruler_hit(pred: str, ref_list: List[str]) -> int:
     return 0
 
 
-def make_judge_prompt(question_block: str, golds: List[str], pred: str) -> str:
-    gold_text = "\n".join([f"- {g}" for g in golds[:5]])
-    return (
-        "You are a strict evaluator. Decide whether the model answer is correct.\n"
-        "Rules:\n"
-        "1) Accept paraphrases and extra correct details.\n"
-        "2) Reject answers that add incorrect specifics even if partly correct.\n"
-        "3) If the answer is ambiguous or not supported, reject.\n"
-        "Return ONLY a single character: 1 (correct) or 0 (incorrect).\n\n"
-        f"ORIGINAL PROMPT (for context):\n{question_block}\n\n"
-        f"GOLD ANSWERS:\n{gold_text}\n\n"
-        f"MODEL ANSWER:\n{pred}\n\n"
-        "OUTPUT (1 or 0):"
-    )
+# def make_judge_prompt(question_block: str, golds: List[str], pred: str) -> str:
+#     gold_text = "\n".join([f"- {g}" for g in golds[:5]])
+#     return (
+#         "You are a strict evaluator. Decide whether the model answer is correct.\n"
+#         "Rules:\n"
+#         "1) Accept paraphrases and extra correct details.\n"
+#         "2) Reject answers that add incorrect specifics even if partly correct.\n"
+#         "3) If the answer is ambiguous or not supported, reject.\n"
+#         "Return ONLY a single character: 1 (correct) or 0 (incorrect).\n\n"
+#         f"ORIGINAL PROMPT (for context):\n{question_block}\n\n"
+#         f"GOLD ANSWERS:\n{gold_text}\n\n"
+#         f"MODEL ANSWER:\n{pred}\n\n"
+#         "OUTPUT (1 or 0):"
+#     )
 
 
-def parse_judge_output(text: str) -> Optional[bool]:
-    t = (text or "").strip()
-    if not t:
-        return None
-    m = re.search(r"[01]", t)
-    if not m:
-        return None
-    return (m.group(0) == "1")
+# def parse_judge_output(text: str) -> Optional[bool]:
+#     t = (text or "").strip()
+#     if not t:
+#         return None
+#     m = re.search(r"[01]", t)
+#     if not m:
+#         return None
+#     return (m.group(0) == "1")
 
 
 def extract_question(prompt: str) -> str:
@@ -202,34 +205,34 @@ def extract_question(prompt: str) -> str:
     return q[:300]
 
 
-def compact_row_custom(
-    ex: Dict[str, Any],
-    task: str,
-    prompt: str,
-    golds: List[str],
-    pred: str,
-    em: bool,
-    soft: bool,
-    needs_judge: bool,
-    judge_ok: Optional[bool],
-    final_ok: bool,
-) -> Dict[str, Any]:
-    out: Dict[str, Any] = {
-        "task": task,
-        "question": extract_question(prompt),
-        "outputs": golds,
-        "prediction": pred,
-        "_em_strict_ok": em,
-        "_em_soft_ok": soft,
-        "_needs_judge": needs_judge,
-        "_judge_ok": judge_ok,
-        "_final_ok": final_ok,
-    }
-    for k in ["id", "qid", "example_id", "idx"]:
-        if k in ex:
-            out[k] = ex[k]
-            break
-    return out
+# def compact_row_custom(
+#     ex: Dict[str, Any],
+#     task: str,
+#     prompt: str,
+#     golds: List[str],
+#     pred: str,
+#     em: bool,
+#     soft: bool,
+#     needs_judge: bool,
+#     judge_ok: Optional[bool],
+#     final_ok: bool,
+# ) -> Dict[str, Any]:
+#     out: Dict[str, Any] = {
+#         "task": task,
+#         "question": extract_question(prompt),
+#         "outputs": golds,
+#         "prediction": pred,
+#         "_em_strict_ok": em,
+#         "_em_soft_ok": soft,
+#         "_needs_judge": needs_judge,
+#         "_judge_ok": judge_ok,
+#         "_final_ok": final_ok,
+#     }
+#     for k in ["id", "qid", "example_id", "idx"]:
+#         if k in ex:
+#             out[k] = ex[k]
+#             break
+#     return out
 
 
 def compact_row_ruler(
@@ -254,6 +257,72 @@ def compact_row_ruler(
     return out
 
 
+def mark_last_layer_entropy_logger(model):
+    logger_modules = []
+    try:
+        core = getattr(model, "model", None)
+        layers = getattr(core, "layers", None) if core is not None else None
+        if layers is not None and len(layers) > 0:
+            for li, layer in enumerate(layers):
+                attn = getattr(layer, "self_attn", None)
+                if attn is not None:
+                    setattr(attn, "layer_idx", li)
+            attn_last = getattr(layers[-1], "self_attn", None)
+            if attn_last is not None:
+                setattr(attn_last, "is_entropy_log_layer", True)
+                logger_modules = [attn_last]
+    except Exception:
+        logger_modules = []
+    setattr(model, "_entropy_logger_modules", logger_modules)
+    return logger_modules
+
+
+def reset_entropy_logs(model):
+    mods = getattr(model, "_entropy_logger_modules", None)
+    if mods:
+        for m in mods:
+            if hasattr(m, "_entropy_log"):
+                delattr(m, "_entropy_log")
+            if hasattr(m, "_decode_step"):
+                delattr(m, "_decode_step")
+        return
+    for m in model.modules():
+        if hasattr(m, "_entropy_log"):
+            delattr(m, "_entropy_log")
+        if hasattr(m, "_decode_step"):
+            delattr(m, "_decode_step")
+
+
+def collect_entropy_logs(model):
+    mods = getattr(model, "_entropy_logger_modules", None)
+    if mods:
+        return getattr(mods[0], "_entropy_log", None)
+    for m in model.modules():
+        if hasattr(m, "_entropy_log"):
+            return m._entropy_log
+    return None
+
+
+def set_temp_max_step(model, max_step: Optional[float]):
+    if max_step is None:
+        return
+    core = getattr(model, "model", None)
+    layers = getattr(core, "layers", None) if core is not None else None
+    if layers is not None:
+        for layer in layers:
+            attn = getattr(layer, "self_attn", None)
+            if attn is not None:
+                setattr(attn, "temp_max_step", float(max_step))
+                if hasattr(attn, "_entropy_temp_controller"):
+                    delattr(attn, "_entropy_temp_controller")
+        return
+    for m in model.modules():
+        if hasattr(m, "num_key_value_groups"):
+            setattr(m, "temp_max_step", float(max_step))
+            if hasattr(m, "_entropy_temp_controller"):
+                delattr(m, "_entropy_temp_controller")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
@@ -261,9 +330,12 @@ def main():
     ap.add_argument("--tasks", default="ALL")
     ap.add_argument("--max_new_tokens", type=int, default=64)
     ap.add_argument("--multiline", action="store_true")
-    ap.add_argument("--pred_name", default="predictions_timed.jsonl")
+    ap.add_argument("--run_tag", default="timed_scaled.jsonl")
+    # ap.add_argument("--entropy_log", action="store_true", help="Dump per-example entropy/temp logs (decode only).")
+    # ap.add_argument("--entropy_log_name", default="entropy_logs.jsonl")
+    ap.add_argument("--max_step", type=float, default=None, help="Override entropy controller max_step.")
     ap.add_argument("--compact", action="store_true")
-    ap.add_argument("--log_every", type=int, default=10)
+    ap.add_argument("--status_every", type=int, default=10)
 
     # Inline judge controls
     ap.add_argument("--use_judge", action="store_true")
@@ -300,6 +372,11 @@ def main():
         dtype=dtype_map[args.dtype],
         deterministic=args.deterministic,
     )
+    if args.attn_impl == "entropy_attn":
+        model_obj = getattr(runner, "model", None)
+        if model_obj is not None:
+            mark_last_layer_entropy_logger(model_obj)
+            set_temp_max_step(model_obj, args.max_step)
 
     all_tasks = sorted(
         [d for d in os.listdir(args.data_root) if os.path.isdir(os.path.join(args.data_root, d))]
@@ -326,8 +403,9 @@ def main():
             continue
 
         # Unique per attn_impl (and optionally dtype) to avoid collisions.
-        pred_path = os.path.join(task_dir, f"{task}_{args.attn_impl}_{args.pred_name}")
-        # pred_path = os.path.join(task_dir, f"{task}_{args.attn_impl}_{args.dtype}_{args.pred_name}")
+        pred_path = os.path.join(task_dir, f"{task}_{args.attn_impl}_predictions_{args.run_tag}")
+        entropy_path = os.path.join(task_dir, f"{task}_{args.attn_impl}_entropy_log_{args.run_tag}")
+        # pred_path = os.path.join(task_dir, f"{task}_{args.attn_impl}_{args.dtype}_{args.run_tag}")
 
         total = 0
         em_strict_ok = 0
@@ -338,12 +416,16 @@ def main():
 
         ruler_hits = 0
 
-        with open(pred_path, "w", encoding="utf-8") as out_f:
+        entropy_ctx = open(entropy_path, "w", encoding="utf-8") if (args.attn_impl == "entropy_attn") else nullcontext(None)
+        with open(pred_path, "w", encoding="utf-8") as out_f, entropy_ctx as ent_f:
             for ex in iter_jsonl(val_path):
                 prompt = ex["input"]
                 answer_prefix = ex.get("answer_prefix", "")
                 if answer_prefix and not prompt.endswith(answer_prefix):
                     prompt = prompt + answer_prefix
+
+                if args.attn_impl == "entropy_attn":
+                    reset_entropy_logs(runner.model)
 
                 pred = _cuda_time_call(
                     lambda: runner.generate_one(
@@ -357,12 +439,28 @@ def main():
 
                 total += 1
 
+                entropy_logs = collect_entropy_logs(runner.model) if args.attn_impl == "entropy_attn" else None
+                if ent_f is not None and entropy_logs is not None:
+                    ex_id = ex.get("id", ex.get("qid", ex.get("example_id", ex.get("idx", total - 1))))
+                    ent_f.write(
+                        json.dumps(
+                            {
+                                "task": task,
+                                "attn_impl": args.attn_impl,
+                                "example_id": ex_id,
+                                "entropy_log": entropy_logs,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+
                 # ---------------- ruler_part ----------------
                 if args.eval_mode == "ruler_part":
                     hit = ruler_hit(pred, list(golds))
                     ruler_hits += hit
 
-                    if args.log_every > 0 and (total % args.log_every == 0):
+                    if args.status_every > 0 and (total % args.status_every == 0):
                         running = round(ruler_hits / max(total, 1) * 100, 2)
                         print(
                             f"[{task}] {total} done | "
@@ -388,78 +486,78 @@ def main():
                     continue
 
                 # ---------------- custom eval ----------------
-                em = any(strict_em(pred, g) for g in golds)
-                lst = any(list_set_match(pred, g) for g in golds)
-                cnt = any(soft_contains(pred, g) for g in golds)
-                soft = em or lst or cnt
+                # em = any(strict_em(pred, g) for g in golds)
+                # lst = any(list_set_match(pred, g) for g in golds)
+                # cnt = any(soft_contains(pred, g) for g in golds)
+                # soft = em or lst or cnt
 
-                needs_judge = False
-                if args.use_judge:
-                    if args.judge_on_all_non_em:
-                        needs_judge = (not em)
-                    else:
-                        needs_judge = (soft and not em)
+                # needs_judge = False
+                # if args.use_judge:
+                #     if args.judge_on_all_non_em:
+                #         needs_judge = (not em)
+                #     else:
+                #         needs_judge = (soft and not em)
 
-                judge_ok: Optional[bool] = None
-                if needs_judge:
-                    judge_calls += 1
-                    jprompt = make_judge_prompt(question_block=prompt, golds=list(golds), pred=pred)
-                    jout = _cuda_time_call(
-                        lambda: runner.generate_one(
-                            jprompt,
-                            max_new_tokens=args.judge_max_new_tokens,
-                            stop_on_newline=True,
-                        ),
-                        enabled=args.time, state=judge_time_state, skip=args.time_skip, times=judge_times_s,
-                    )
-                    judge_ok = parse_judge_output(jout)
-                    if judge_ok is None:
-                        judge_parse_fail += 1
+                # judge_ok: Optional[bool] = None
+                # if needs_judge:
+                #     judge_calls += 1
+                #     jprompt = make_judge_prompt(question_block=prompt, golds=list(golds), pred=pred)
+                #     jout = _cuda_time_call(
+                #         lambda: runner.generate_one(
+                #             jprompt,
+                #             max_new_tokens=args.judge_max_new_tokens,
+                #             stop_on_newline=True,
+                #         ),
+                #         enabled=args.time, state=judge_time_state, skip=args.time_skip, times=judge_times_s,
+                #     )
+                #     judge_ok = parse_judge_output(jout)
+                #     if judge_ok is None:
+                #         judge_parse_fail += 1
 
-                if em:
-                    ok = True
-                elif needs_judge:
-                    ok = (judge_ok if judge_ok is not None else soft)
-                else:
-                    ok = soft
+                # if em:
+                #     ok = True
+                # elif needs_judge:
+                #     ok = (judge_ok if judge_ok is not None else soft)
+                # else:
+                #     ok = soft
 
-                em_strict_ok += int(em)
-                em_soft_ok += int(soft)
-                final_ok += int(ok)
+                # em_strict_ok += int(em)
+                # em_soft_ok += int(soft)
+                # final_ok += int(ok)
 
-                if args.log_every > 0 and (total % args.log_every == 0):
-                    print(
-                        f"[{task}] {total} done | "
-                        f"strict={fmt_ratio(em_strict_ok, total)} | "
-                        f"soft={fmt_ratio(em_soft_ok, total)} | "
-                        f"final={fmt_ratio(final_ok, total)} | "
-                        f"judge_calls={judge_calls}"
-                    )
+                # if args.status_every > 0 and (total % args.status_every == 0):
+                #     print(
+                #         f"[{task}] {total} done | "
+                #         f"strict={fmt_ratio(em_strict_ok, total)} | "
+                #         f"soft={fmt_ratio(em_soft_ok, total)} | "
+                #         f"final={fmt_ratio(final_ok, total)} | "
+                #         f"judge_calls={judge_calls}"
+                #     )
 
-                if args.compact:
-                    ex_out = compact_row_custom(
-                        ex=ex,
-                        task=task,
-                        prompt=prompt,
-                        golds=list(golds),
-                        pred=pred,
-                        em=em,
-                        soft=soft,
-                        needs_judge=needs_judge,
-                        judge_ok=judge_ok,
-                        final_ok=ok,
-                    )
-                else:
-                    ex_out = dict(ex)
-                    ex_out["prediction"] = pred
-                    ex_out["_em_strict_ok"] = em
-                    ex_out["_em_soft_ok"] = soft
-                    ex_out["_needs_judge"] = needs_judge
-                    ex_out["_judge_ok"] = judge_ok
-                    ex_out["_final_ok"] = ok
+                # if args.compact:
+                #     ex_out = compact_row_custom(
+                #         ex=ex,
+                #         task=task,
+                #         prompt=prompt,
+                #         golds=list(golds),
+                #         pred=pred,
+                #         em=em,
+                #         soft=soft,
+                #         needs_judge=needs_judge,
+                #         judge_ok=judge_ok,
+                #         final_ok=ok,
+                #     )
+                # else:
+                #     ex_out = dict(ex)
+                #     ex_out["prediction"] = pred
+                #     ex_out["_em_strict_ok"] = em
+                #     ex_out["_em_soft_ok"] = soft
+                #     ex_out["_needs_judge"] = needs_judge
+                #     ex_out["_judge_ok"] = judge_ok
+                #     ex_out["_final_ok"] = ok
 
-                out_f.write(json.dumps(ex_out, ensure_ascii=False) + "\n")
-                out_f.flush()
+                # out_f.write(json.dumps(ex_out, ensure_ascii=False) + "\n")
+                # out_f.flush()
 
         if args.eval_mode == "ruler_part":
             ruler_score = round(ruler_hits / max(total, 1) * 100, 2)
@@ -507,7 +605,7 @@ def main():
         }
 
     tasks_tag = _safe_name(args.tasks)
-    pred_stem = os.path.splitext(os.path.basename(args.pred_name))[0]
+    pred_stem = os.path.splitext(os.path.basename(args.run_tag))[0]
     summ_path = os.path.join(args.data_root, f"summary_{tasks_tag}_{args.attn_impl}_{_safe_name(pred_stem)}.json")
     # summ_path = os.path.join(args.data_root, f"summary_{tasks_tag}_{args.attn_impl}_{args.dtype}.json")
 

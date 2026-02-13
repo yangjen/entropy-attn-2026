@@ -67,13 +67,14 @@ def entropy_attention_forward(
     """
     # ---------- entropy-conditioned temperature (single controller) ----------
     if not hasattr(module, "_entropy_temp_controller"):
+        max_step = getattr(module, "temp_max_step", 0.0005)
         module._entropy_temp_controller = EntropyTempController(
             temp_init=1.0,
             temp_min=0.7,
             temp_max=1.0,
             ema_beta=0.9,
             kp=0.35, # proportional gain
-            max_step=0.0005,
+            max_step=max_step,
         )
 
     controller = module._entropy_temp_controller
@@ -116,6 +117,23 @@ def entropy_attention_forward(
 
         module.past_entropy = entropy_last
         module.past_temp = controller.temp.detach()
+
+        # Optional per-step logging (typically enabled only on last layer).
+        if getattr(module, "is_entropy_log_layer", False):
+            if not hasattr(module, "_entropy_log"):
+                module._entropy_log = []
+                module._decode_step = 0
+
+            module._entropy_log.append(
+                {
+                    "step": int(module._decode_step),
+                    "entropy_mean": float(entropy_last.mean().item()),
+                    "entropy_std": float(entropy_last.std().item()),
+                    "temp_mean": float(controller.temp.mean().item()),
+                    "kv_len": int(kv_len),
+                }
+            )
+            module._decode_step += 1
 
     # ---- sanity check (sampled) ----
     if N_CTX == 1 and controller.prompt_target_entropy is not None and torch.rand(1).item() < 0.01:
