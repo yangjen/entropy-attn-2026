@@ -70,20 +70,28 @@ class EntropyTempController:
         ).clamp(min=1.0)
 
         H_norm = entropy_last / norm
+        valid_entropy = torch.isfinite(H_norm)
+        H_safe = torch.where(valid_entropy, H_norm, torch.zeros_like(H_norm))
 
-        # EMA smoothing
-        self.ema_entropy.mul_(self.ema_beta).add_(H_norm * (1 - self.ema_beta))
+        # EMA smoothing: update only finite lanes; keep previous value otherwise.
+        ema_new = self.ema_entropy * self.ema_beta + H_safe * (1 - self.ema_beta)
+        self.ema_entropy = torch.where(valid_entropy, ema_new, self.ema_entropy)
 
         # error signal
         if self.prompt_target_entropy is not None:
-            err = self.ema_entropy - self.prompt_target_entropy
+            valid_target = torch.isfinite(self.prompt_target_entropy)
+            valid = valid_entropy & valid_target
+            target = torch.where(valid_target, self.prompt_target_entropy, torch.zeros_like(self.prompt_target_entropy))
+            err = self.ema_entropy - target
         else:
             # fallback: pure sharpening when entropy is high
+            valid = valid_entropy
             err = self.ema_entropy
 
         # proportional control (operate in temp space)
         delta = -self.kp * err
         delta = delta.clamp(-self.max_step, self.max_step)
+        delta = torch.where(valid, delta, torch.zeros_like(delta))
 
         self.temp.add_(delta)
         self.temp.clamp_(self.temp_min, self.temp_max)

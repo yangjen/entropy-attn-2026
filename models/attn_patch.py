@@ -136,14 +136,14 @@ def entropy_attention_forward(
             module._decode_step += 1
 
     # ---- sanity check (sampled) ----
-    if N_CTX == 1 and controller.prompt_target_entropy is not None and torch.rand(1).item() < 0.01:
-        layer_idx = getattr(module, "layer_idx", "?")
-        print(
-            f"[layer {layer_idx}] "
-            f"H*={controller.prompt_target_entropy.mean().item():.3f} "
-            f"H={controller.ema_entropy.mean().item():.3f} "
-            f"T={controller.temp.mean().item():.3f}"
-        )
+    # if N_CTX == 1 and controller.prompt_target_entropy is not None and torch.rand(1).item() < 0.01:
+    #     layer_idx = getattr(module, "layer_idx", "?")
+    #     print(
+    #         f"[layer {layer_idx}] "
+    #         f"H*={controller.prompt_target_entropy.mean().item():.3f} "
+    #         f"H={controller.ema_entropy.mean().item():.3f} "
+    #         f"T={controller.temp.mean().item():.3f}"
+    #     )
 
     attn_output = attn_output.transpose(1, 2).contiguous()
     return attn_output, None
