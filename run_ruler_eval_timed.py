@@ -15,7 +15,7 @@ CUDA_VISIBLE_DEVICES=3 python run_ruler_eval_timed.py \
   --max_step 0.0005 \
   --run_tag predictions_timed_scaled.jsonl
 
-  CUDA_VISIBLE_DEVICES=6 python run_ruler_eval_timed.py \
+  CUDA_VISIBLE_DEVICES=1 python run_ruler_eval_timed.py \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --data_root /c2/jenny/r3/RULER_outputs/llama3.1-8b-chat/synthetic/32768/data \
   --tasks qa_2 \
@@ -29,7 +29,7 @@ CUDA_VISIBLE_DEVICES=3 python run_ruler_eval_timed.py \
   --time \
   --time_skip 4 \
   --max_step 0.0005 \
-  --run_tag predictions_timed_scaled_debug_finite_mask_strict.jsonl
+  --run_tag predictions_timed_scaled_version_check_6bb0fbe.jsonl
 
 
 '''
