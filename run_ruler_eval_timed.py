@@ -29,6 +29,7 @@ CUDA_VISIBLE_DEVICES=3 python run_ruler_eval_timed.py \
   --time \
   --time_skip 4 \
   --max_step 0.0005 \
+  --target_trim_ratio 0.10 \
   --run_tag predictions_timed_scaled_version_check_6bb0fbe.jsonl
 
 
@@ -322,6 +323,20 @@ def set_temp_max_step(model, max_step: Optional[float]):
             if hasattr(m, "_entropy_temp_controller"):
                 delattr(m, "_entropy_temp_controller")
 
+def set_target_trim_ratio(model, trim_ratio: Optional[float]):
+    if trim_ratio is None:
+        return
+    core = getattr(model, "model", None)
+    layers = getattr(core, "layers", None) if core is not None else None
+    if layers is not None:
+        for layer in layers:
+            attn = getattr(layer, "self_attn", None)
+            if attn is not None:
+                setattr(attn, "target_trim_ratio", float(trim_ratio))
+        return
+    for m in model.modules():
+        if hasattr(m, "num_key_value_groups"):
+            setattr(m, "target_trim_ratio", float(trim_ratio))
 
 def main():
     ap = argparse.ArgumentParser()
@@ -341,18 +356,22 @@ def main():
     ap.add_argument("--use_judge", action="store_true")
     ap.add_argument("--judge_max_new_tokens", type=int, default=4)
     ap.add_argument("--judge_on_all_non_em", action="store_true")
-
     ap.add_argument(
         "--eval_mode",
         default="custom",
         choices=["custom", "ruler_part"],
         help="custom: strict/soft EM + optional LLM judge; ruler_part: RULER string_match_part only",
     )
-
     ap.add_argument(
         "--attn_impl",
         default="entropy_attn",
         choices=["entropy_attn", "sdpa", "flash_attention_2", "eager"],
+    )
+    ap.add_argument(
+        "--target_trim_ratio",
+        type=float,
+        default=0.0,
+        help="Trim ratio for prompt-tail target (e.g. 0.05 trims 5%% low/high).",
     )
     ap.add_argument("--dtype", default="bf16", choices=["bf16", "fp16", "fp32"])
     ap.add_argument("--deterministic", action="store_true")
@@ -377,6 +396,7 @@ def main():
         if model_obj is not None:
             mark_last_layer_entropy_logger(model_obj)
             set_temp_max_step(model_obj, args.max_step)
+            set_target_trim_ratio(model_obj, args.target_trim_ratio)
 
     all_tasks = sorted(
         [d for d in os.listdir(args.data_root) if os.path.isdir(os.path.join(args.data_root, d))]
