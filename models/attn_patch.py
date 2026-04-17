@@ -68,6 +68,7 @@ def entropy_attention_forward(
     # ---------- entropy-conditioned temperature (single controller) ----------
     if not hasattr(module, "_entropy_temp_controller"):
         max_step = getattr(module, "temp_max_step", 0.0005)
+        dead_band = getattr(module, "dead_band", None)
         module._entropy_temp_controller = EntropyTempController(
             temp_init=1.0,
             temp_min=0.7,
@@ -75,12 +76,14 @@ def entropy_attention_forward(
             ema_beta=0.9,
             kp=0.35, # proportional gain
             max_step=max_step,
+            dead_band=dead_band,
         )
 
     controller = module._entropy_temp_controller
 
-    # initialize controller state once
-    if controller.temp is None:
+    # initialize controller state once (or if shape drifted due external initialization)
+    expected_shape = (Z, H, 1)
+    if controller.temp is None or tuple(controller.temp.shape) != expected_shape:
         controller._init_state((Z, H, 1), query.device)
 
     temp = controller.temp.expand(Z, H, N_CTX)
@@ -101,7 +104,7 @@ def entropy_attention_forward(
         ).clamp(min=1.0)
 
         # use tail of prompt (last K tokens)
-        K = min(256, H_norm.shape[-1])
+        K = min(getattr(module, "calibration_tail_k", 256), H_norm.shape[-1])
         tail = H_norm[:, :, -K:]              # [Z, H, K]
 
         # # use tail entropy mean as target (no trim)

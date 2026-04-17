@@ -28,12 +28,14 @@ class EntropyTempController:
         ema_beta=0.9,
         kp=0.35,
         max_step=0.05,
+        dead_band=None,
     ):
         self.temp_min = temp_min
         self.temp_max = temp_max
         self.ema_beta = ema_beta
         self.kp = kp
         self.max_step = max_step
+        self.dead_band = dead_band  # normalized entropy units; None = disabled
 
         self.temp = None                    # [Z, H, 1]
         self.ema_entropy = None             # [Z, H, 1]
@@ -87,6 +89,10 @@ class EntropyTempController:
             # fallback: pure sharpening when entropy is high
             valid = valid_entropy
             err = self.ema_entropy
+
+        # dead band: suppress control action when error is within tolerance
+        if self.dead_band is not None:
+            err = torch.where(err.abs() < self.dead_band, torch.zeros_like(err), err)
 
         # proportional control (operate in temp space)
         delta = -self.kp * err
