@@ -475,6 +475,12 @@ def ruler_hit(pred: str, ref_list: List[str]) -> int:
     return 0
 
 
+def ruler_hit_all(pred: str, ref_list: List[str]) -> int:
+    """string_match_all: 1 only if every reference appears in the prediction (RULER paper metric for cwe/fwe)."""
+    pred_l = (pred or "").lower()
+    return int(all((r or "").lower() in pred_l for r in ref_list))
+
+
 def extract_question(prompt: str) -> str:
     if not prompt:
         return ""
@@ -498,6 +504,7 @@ def compact_row_common(
     c_hit: int,
     e_hit: int,
     r_hit: int,
+    ra_hit: int,
 ) -> Dict[str, Any]:
     return {
         "task": task,
@@ -509,6 +516,7 @@ def compact_row_common(
         "_contains_hit": bool(c_hit),
         "_exact_hit": bool(e_hit),
         "_ruler_part_hit": bool(r_hit),
+        "_ruler_all_hit": bool(ra_hit),
     }
 
 
@@ -828,6 +836,7 @@ def main():
         hit_contains = 0
         hit_exact = 0
         hit_ruler = 0
+        hit_ruler_all = 0
         session_summaries: List[Dict[str, Any]] = []
 
         if args.dataset_type == "ruler":
@@ -845,6 +854,7 @@ def main():
                 session_hit_contains = 0
                 session_hit_exact = 0
                 session_hit_ruler = 0
+                session_hit_ruler_all = 0
                 session_n = 0
                 session_target_init = None
                 session_temp_init = None
@@ -1005,13 +1015,16 @@ def main():
 
                     # Always compute all metrics; metric_mode only controls status logging emphasis.
                     r_hit = ruler_hit(pred, list(golds))
+                    ra_hit = ruler_hit_all(pred, list(golds))
                     c_hit = contains_any(pred, list(golds))
                     e_hit = exact_any(pred, list(golds))
 
                     hit_ruler += r_hit
+                    hit_ruler_all += ra_hit
                     hit_contains += c_hit
                     hit_exact += e_hit
                     session_hit_ruler += r_hit
+                    session_hit_ruler_all += ra_hit
                     session_hit_contains += c_hit
                     session_hit_exact += e_hit
                     total += 1
@@ -1045,6 +1058,7 @@ def main():
                             c_hit=c_hit,
                             e_hit=e_hit,
                             r_hit=r_hit,
+                            ra_hit=ra_hit,
                         )
                     else:
                         ex_out = {
@@ -1060,6 +1074,7 @@ def main():
                             "_contains_hit": bool(c_hit),
                             "_exact_hit": bool(e_hit),
                             "_ruler_part_hit": bool(r_hit),
+                            "_ruler_all_hit": bool(ra_hit),
                         }
                         if args.dataset_type == "ruler":
                             ex_out["outputs"] = list(golds)
@@ -1068,7 +1083,8 @@ def main():
                     if args.status_every > 0 and (total % args.status_every == 0):
                         if args.metric_mode == "ruler_part":
                             r_acc = 100.0 * hit_ruler / max(total, 1)
-                            print(f"[{task}] {total} done | ruler_part={r_acc:.2f}% ({hit_ruler}/{total})")
+                            ra_acc = 100.0 * hit_ruler_all / max(total, 1)
+                            print(f"[{task}] {total} done | ruler_part={r_acc:.2f}% | ruler_all={ra_acc:.2f}% ({hit_ruler_all}/{total})")
                         elif args.metric_mode == "contains_exact":
                             c_acc = 100.0 * hit_contains / max(total, 1)
                             e_acc = 100.0 * hit_exact / max(total, 1)
@@ -1078,10 +1094,12 @@ def main():
                             )
                         else:
                             r_acc = 100.0 * hit_ruler / max(total, 1)
+                            ra_acc = 100.0 * hit_ruler_all / max(total, 1)
                             c_acc = 100.0 * hit_contains / max(total, 1)
                             e_acc = 100.0 * hit_exact / max(total, 1)
                             print(
                                 f"[{task}] {total} done | ruler_part={r_acc:.2f}% ({hit_ruler}/{total}) "
+                                f"| ruler_all={ra_acc:.2f}% ({hit_ruler_all}/{total}) "
                                 f"| contains={c_acc:.2f}% ({hit_contains}/{total}) "
                                 f"| exact={e_acc:.2f}% ({hit_exact}/{total})"
                             )
@@ -1095,6 +1113,7 @@ def main():
                     "contains_acc": round(100.0 * session_hit_contains / max(session_n, 1), 2),
                     "exact_acc": round(100.0 * session_hit_exact / max(session_n, 1), 2),
                     "ruler_part_acc": round(100.0 * session_hit_ruler / max(session_n, 1), 2),
+                    "ruler_all_acc": round(100.0 * session_hit_ruler_all / max(session_n, 1), 2),
                 }
                 if args.attn_impl == "entropy_attn":
                     session_summary["session_target_init"] = float(session_target_init) if session_target_init is not None else None
@@ -1104,6 +1123,7 @@ def main():
                 print(
                     f"[{task}] session {session_idx} | n={session_n} | "
                     f"ruler_part={session_summary['ruler_part_acc']:.2f}% | "
+                    f"ruler_all={session_summary['ruler_all_acc']:.2f}% | "
                     f"contains={session_summary['contains_acc']:.2f}% | "
                     f"exact={session_summary['exact_acc']:.2f}%"
                 )
@@ -1117,6 +1137,7 @@ def main():
             "contains_acc": round(100.0 * hit_contains / max(total, 1), 2),
             "exact_acc": round(100.0 * hit_exact / max(total, 1), 2),
             "ruler_part_acc": round(100.0 * hit_ruler / max(total, 1), 2),
+            "ruler_all_acc": round(100.0 * hit_ruler_all / max(total, 1), 2),
             "prediction_file": pred_path,
             "session_summary_file": session_summary_path,
             "num_sessions": len(session_summaries),
