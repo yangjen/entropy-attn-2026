@@ -25,9 +25,9 @@ class EntropyTempController:
         temp_init=1.0,
         temp_min=0.7,
         temp_max=1.0,
-        ema_beta=0.9,
+        ema_beta=0.7,
         kp=0.35,
-        max_step=0.05,
+        max_step=0.005,
         dead_band=None,
     ):
         self.temp_min = temp_min
@@ -50,23 +50,17 @@ class EntropyTempController:
         self.ema_entropy = torch.zeros(shape, device=device)
 
     def set_prompt_target(self, target_entropy: torch.Tensor):
-        """
-        target_entropy: [Z, H, 1], normalized
-        """
+        """target_entropy: [Z, H, 1], normalized"""
         self.prompt_target_entropy = target_entropy.detach()
 
     # ---------- update ----------
 
     @torch.no_grad()
     def update(self, entropy_last: torch.Tensor, kv_len: int):
-        """
-        entropy_last: [Z, H, 1] (last query token)
-        kv_len: current KV cache length
-        """
+        """entropy_last: [Z, H, 1] (last query token), kv_len: current KV cache length"""
         if self.temp is None:
             self._init_state(entropy_last.shape, entropy_last.device)
 
-        # normalize entropy so prompt/decode are comparable
         norm = torch.log(
             torch.tensor(float(kv_len), device=entropy_last.device)
         ).clamp(min=1.0)
@@ -75,26 +69,21 @@ class EntropyTempController:
         valid_entropy = torch.isfinite(H_norm)
         H_safe = torch.where(valid_entropy, H_norm, torch.zeros_like(H_norm))
 
-        # EMA smoothing: update only finite lanes; keep previous value otherwise.
         ema_new = self.ema_entropy * self.ema_beta + H_safe * (1 - self.ema_beta)
         self.ema_entropy = torch.where(valid_entropy, ema_new, self.ema_entropy)
 
-        # error signal
         if self.prompt_target_entropy is not None:
             valid_target = torch.isfinite(self.prompt_target_entropy)
             valid = valid_entropy & valid_target
             target = torch.where(valid_target, self.prompt_target_entropy, torch.zeros_like(self.prompt_target_entropy))
             err = self.ema_entropy - target
         else:
-            # fallback: pure sharpening when entropy is high
             valid = valid_entropy
             err = self.ema_entropy
 
-        # dead band: suppress control action when error is within tolerance
         if self.dead_band is not None:
             err = torch.where(err.abs() < self.dead_band, torch.zeros_like(err), err)
 
-        # proportional control (operate in temp space)
         delta = -self.kp * err
         delta = delta.clamp(-self.max_step, self.max_step)
         delta = torch.where(valid, delta, torch.zeros_like(delta))

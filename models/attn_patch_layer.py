@@ -1,3 +1,20 @@
+# models/attn_patch_layer.py
+"""
+Per-layer, per-head entropy logging variant of attn_patch.py.
+
+Identical to attn_patch.py except the decode-time log entry adds:
+  "entropy_per_head": [H floats]   — raw entropy per query head at this step
+
+and respects an optional max_log_steps attribute on the module to cap
+how many decode steps are logged per layer (keeps output size manageable).
+
+Use with mark_all_layers_entropy_logger() + collect_all_layer_entropy_logs()
+from mrcr_qwen35_session_tuning.py.
+
+To use: register as "entropy_attn_layer" via attention_qwen._register_entropy_attn_layer().
+Original attn_patch.py and the "entropy_attn" impl are untouched.
+"""
+
 import torch
 from typing import Optional
 from models.entropy_attn_triton import attention as entropy_attention
@@ -6,16 +23,14 @@ from models.entropy_scaling import EntropyTempController
 
 logger = logging.get_logger(__name__)
 
+
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
     hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
 
 def entropy_attention_forward(
     module: torch.nn.Module,
@@ -39,32 +54,14 @@ def entropy_attention_forward(
 
     logger.warning_once(f"WARNING: entropy attention backward and custom attention masking across the batch is not implemented at this time")
 
-    # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
-    # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
-    # Note that it is important to check first for the shape, otherwise compile will fail with `argument 'is_causal' must be bool, not SymBool`
     if is_causal is None:
-        # The last condition is for encoder (decoder) models which specify this by passing their own `is_causal` flag
-        # This is mainly due to those models having mixed implementations for encoder, decoder, and encoder-decoder attns
         is_causal = query.shape[2] > 1 and attention_mask is None and getattr(module, "is_causal", True)
 
-    # print(f"{scaling=} {is_causal=}")
-    # Shapes (e.g. query.shape[2]) are tensors during jit tracing, resulting in `is_causal` being a tensor.
-    # We convert it to a bool for the SDPA kernel that only accepts bools.
     if torch.jit.is_tracing() and isinstance(is_causal, torch.Tensor):
         is_causal = is_causal.item()
 
     Z, H, N_CTX, D = query.size()
 
-    # if hasattr(module, "past_entropy"):
-    #     # calculate the temperature somehow based on the past entropy
-    #     temp = torch.ones(Z, H, N_CTX, device=query.device, dtype=query.dtype)
-    # else:
-    #     temp = torch.ones(Z, H, N_CTX, device=query.device, dtype=query.dtype)
-    """
-    update temp using last token entropy, keep per-head state
-    Maintain a per-layer, per-head scalar temperature state (e.g., [Z, H, 1])
-
-    """
     # ---------- entropy-conditioned temperature (single controller) ----------
     if not hasattr(module, "_entropy_temp_controller"):
         max_step = getattr(module, "temp_max_step", 0.0005)
@@ -74,19 +71,16 @@ def entropy_attention_forward(
             temp_min=0.7,
             temp_max=1.0,
             ema_beta=0.9,
-            kp=0.35, # proportional gain
+            kp=0.35,
             max_step=max_step,
             dead_band=dead_band,
         )
 
     controller = module._entropy_temp_controller
 
-    # initialize controller state once (or if shape drifted due external initialization)
     expected_shape = (Z, H, 1)
     if controller.temp is None or tuple(controller.temp.shape) != expected_shape:
         controller._init_state((Z, H, 1), query.device)
-        # prompt_target_entropy from a mismatched init is now stale — clear it so
-        # the prefill path below re-derives it at the correct head count.
         if (controller.prompt_target_entropy is not None
                 and tuple(controller.prompt_target_entropy.shape) != expected_shape):
             controller.prompt_target_entropy = None
@@ -108,15 +102,9 @@ def entropy_attention_forward(
             torch.tensor(float(kv_len), device=attn_entropy.device)
         ).clamp(min=1.0)
 
-        # use tail of prompt (last K tokens)
         K = min(getattr(module, "calibration_tail_k", 256), H_norm.shape[-1])
-        tail = H_norm[:, :, -K:]              # [Z, H, K]
+        tail = H_norm[:, :, -K:]
 
-        # # use tail entropy mean as target (no trim)
-        # prompt_target = tail.mean(dim=-1, keepdim=True) 
-        # controller.set_prompt_target(prompt_target)
-        
-        # use tail entropy trimmed-mean as target (trim low/high outliers)
         trim_ratio = float(getattr(module, "target_trim_ratio", 0.0))
         trim_ratio = max(0.0, min(0.49, trim_ratio))
         trim_n = int(K * trim_ratio)
@@ -130,7 +118,7 @@ def entropy_attention_forward(
 
     # ---------- decode-time entropy feedback ----------
     if N_CTX == 1:
-        entropy_last = attn_entropy[:, :, -1:].detach()
+        entropy_last = attn_entropy[:, :, -1:].detach()  # [Z, H, 1]
         kv_len = key.shape[2]
 
         controller.update(entropy_last, kv_len)
@@ -138,32 +126,27 @@ def entropy_attention_forward(
         module.past_entropy = entropy_last
         module.past_temp = controller.temp.detach()
 
-        # Optional per-step logging (typically enabled only on last layer).
+        # Per-layer, per-head logging (enabled when is_entropy_log_layer is set).
         if getattr(module, "is_entropy_log_layer", False):
             if not hasattr(module, "_entropy_log"):
                 module._entropy_log = []
                 module._decode_step = 0
 
-            module._entropy_log.append(
-                {
-                    "step": int(module._decode_step),
-                    "entropy_mean": float(entropy_last.mean().item()),
-                    "entropy_std": float(entropy_last.std().item()),
-                    "temp_mean": float(controller.temp.mean().item()),
-                    "kv_len": int(kv_len),
-                }
-            )
+            max_log_steps = getattr(module, "max_log_steps", 0)
+            if max_log_steps <= 0 or module._decode_step < max_log_steps:
+                # entropy_last shape: [Z=1, H, 1] — extract [H] floats
+                per_head = entropy_last[0, :, 0].tolist()
+                module._entropy_log.append(
+                    {
+                        "step": int(module._decode_step),
+                        "entropy_mean": float(entropy_last.mean().item()),
+                        "entropy_std": float(entropy_last.std().item()),
+                        "entropy_per_head": per_head,   # [H] raw (not yet / log(kv_len))
+                        "temp_mean": float(controller.temp.mean().item()),
+                        "kv_len": int(kv_len),
+                    }
+                )
             module._decode_step += 1
-
-    # ---- sanity check (sampled) ----
-    # if N_CTX == 1 and controller.prompt_target_entropy is not None and torch.rand(1).item() < 0.01:
-    #     layer_idx = getattr(module, "layer_idx", "?")
-    #     print(
-    #         f"[layer {layer_idx}] "
-    #         f"H*={controller.prompt_target_entropy.mean().item():.3f} "
-    #         f"H={controller.ema_entropy.mean().item():.3f} "
-    #         f"T={controller.temp.mean().item():.3f}"
-    #     )
 
     attn_output = attn_output.transpose(1, 2).contiguous()
     return attn_output, None

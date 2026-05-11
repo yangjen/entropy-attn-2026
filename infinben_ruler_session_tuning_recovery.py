@@ -1,7 +1,7 @@
 """
 Example usage (HF dataset):
 InfiniteBench:
-CUDA_VISIBLE_DEVICES=0 python /c2/jenny/r3/entropy-attn-2026/infinitebench_tuning.py \
+CUDA_VISIBLE_DEVICES=2 python /c2/jenny/r3/entropy-attn-2026/infinitebench_tuning.py \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --dataset_type infinitebench \
   --tasks longbook_qa_eng \
@@ -28,16 +28,12 @@ CUDA_VISIBLE_DEVICES=0 python /c2/jenny/r3/entropy-attn-2026/infinitebench_tunin
   --truncate_strategy head_tail \
   --run_tag tuning_sessions_testing_40.jsonl
 
-  --model gradientai/Llama-3-8B-Instruct-262k \
-  --model meta-llama/Llama-3.1-8B-Instruct \
-
-  
 Ruler:
-CUDA_VISIBLE_DEVICES=0 python /c2/jenny/r3/entropy-attn-2026/infinben_ruler_session_tuning.py \
-  --model gradientai/Llama-3-8B-Instruct-262k \
+CUDA_VISIBLE_DEVICES=0 python /c2/jenny/r3/entropy-attn-2026/infinben_ruler_session_tuning_recovery.py \
+  --model meta-llama/Llama-3.1-8B-Instruct \
   --dataset_type ruler \
-  --data_root /c2/jenny/r3/RULER_outputs/llama3.1-8b-chat/synthetic/131072/data \
-  --tasks cwe,fwe \
+  --data_root /c2/jenny/r3/RULER_outputs/llama3.1-8b-chat/synthetic/32768/data \
+  --tasks qa_2 \
   --max_examples 0 \
   --session_size 50 \
   --session_init_mode calibrated_per_head \
@@ -50,7 +46,7 @@ CUDA_VISIBLE_DEVICES=0 python /c2/jenny/r3/entropy-attn-2026/infinben_ruler_sess
   --target_trim_ratio 0.10 \
   --prompt_style ruler_raw \
   --metric_mode both \
-  --output_root /c2/jenny/r3/RULER_outputs/llama3.1-8b-chat/synthetic/131072/data_session_runs \
+  --output_root /c2/jenny/r3/RULER_outputs/llama3.1-8b-chat/synthetic/32768/data_session_runs \
   --attn_impl entropy_attn \
   --dtype bf16 \
   --compact \
@@ -59,7 +55,7 @@ CUDA_VISIBLE_DEVICES=0 python /c2/jenny/r3/entropy-attn-2026/infinben_ruler_sess
   --time --time_skip 4 \
   --multiline \
   --ruler_append_answer_prefix \
-  --run_tag 50session_3cali_prefixON_0p7ema_YaRN.jsonl
+  --run_tag 50session_3cali_prefixON_rerun_may.jsonl
 ------------------------------------
   
   --max_input_tokens 33000 \
@@ -86,11 +82,11 @@ CUDA_VISIBLE_DEVICES=3 python /c2/jenny/r3/entropy-attn-2026/infinitebench_tunin
   --run_tag session_baseline_sdpa.jsonl
 
 Ruler:
-CUDA_VISIBLE_DEVICES=3 python /c2/jenny/r3/entropy-attn-2026/infinben_ruler_session_tuning.py \
-  --model gradientai/Llama-3-8B-Instruct-262k \
+CUDA_VISIBLE_DEVICES=0 python /c2/jenny/r3/entropy-attn-2026/infinben_ruler_session_tuning.py \
+  --model meta-llama/Llama-3.1-8B-Instruct \
   --dataset_type ruler \
   --data_root /c2/jenny/r3/RULER_outputs/llama3.1-8b-chat/synthetic/131072/data \
-  --tasks qa_1 \
+  --tasks qa_2,qa_1 \
   --max_examples 0 \
   --prompt_style ruler_raw \
   --metric_mode both \
@@ -108,35 +104,6 @@ CUDA_VISIBLE_DEVICES=3 python /c2/jenny/r3/entropy-attn-2026/infinben_ruler_sess
   --max_input_tokens 33000 \
   --overlength_policy truncate \
   --truncate_strategy tail \
-  
-attn-entropy version baseline CLI:
-CUDA_VISIBLE_DEVICES=3 python /c2/jenny/r3/entropy-attn-2026/infinben_ruler_session_tuning.py \
-  --model meta-llama/Llama-3.1-8B-Instruct \
-  --dataset_type ruler \
-  --data_root /c2/jenny/r3/RULER_outputs/llama3.1-8b-chat/synthetic/32768/data \
-  --tasks cwe,fwe \
-  --max_examples 0 \
-  --session_size 100000 \
-  --session_init_mode calibrated_scalar \
-  --session_calibration_samples 3 \
-  --session_target_stat mean \
-  --session_ema_init_mode target \
-  --session_temp_init 1.0 \
-  --session_temp_target_gain 0.0 \
-  --max_step 0.0 \
-  --target_trim_ratio 0.0 \
-  --prompt_style ruler_raw \
-  --metric_mode both \
-  --output_root /c2/jenny/r3/RULER_outputs/llama3.1-8b-chat/synthetic/32768/data_session_runs \
-  --attn_impl entropy_attn \
-  --dtype bf16 \
-  --compact \
-  --max_new_tokens 128 \
-  --deterministic \
-  --time --time_skip 4 \
-  --multiline \
-  --ruler_append_answer_prefix \
-  --run_tag entropy_attn_baseline_no_session_prefixON.jsonl
 """
 
 import argparse
@@ -426,7 +393,7 @@ def initialize_entropy_controller_state(
             temp_init=float(temp_init),
             temp_min=0.7,
             temp_max=1.0,
-            ema_beta=0.7,
+            ema_beta=0.9,
             kp=0.35,
             max_step=max_step,
         )
@@ -508,12 +475,10 @@ def ruler_hit(pred: str, ref_list: List[str]) -> int:
     return 0
 
 
-def ruler_hit_all(pred: str, ref_list: List[str]) -> float:
-    """string_match_all: fraction of references found in prediction (matches RULER paper metric for cwe/fwe)."""
-    if not ref_list:
-        return 0.0
+def ruler_hit_all(pred: str, ref_list: List[str]) -> int:
+    """string_match_all: 1 only if every reference appears in the prediction (RULER paper metric for cwe/fwe)."""
     pred_l = (pred or "").lower()
-    return sum(1.0 for r in ref_list if (r or "").lower() in pred_l) / len(ref_list)
+    return int(all((r or "").lower() in pred_l for r in ref_list))
 
 
 def extract_question(prompt: str) -> str:
@@ -539,7 +504,7 @@ def compact_row_common(
     c_hit: int,
     e_hit: int,
     r_hit: int,
-    ra_hit: float,
+    ra_hit: int,
 ) -> Dict[str, Any]:
     return {
         "task": task,
@@ -551,7 +516,7 @@ def compact_row_common(
         "_contains_hit": bool(c_hit),
         "_exact_hit": bool(e_hit),
         "_ruler_part_hit": bool(r_hit),
-        "_ruler_all_hit": round(ra_hit, 4),
+        "_ruler_all_hit": bool(ra_hit),
     }
 
 
@@ -824,12 +789,11 @@ def main():
     )
     ap.add_argument(
         "--calibration_tail_k",
-        default="256",
-        help="Number of tail tokens used to compute the prompt entropy calibration target. "
-             "Comma-separated list for ablation (e.g. '64,128,256,512').",
+        type=int,
+        default=256,
+        help="Number of tail tokens used to compute the prompt entropy calibration target.",
     )
     args = ap.parse_args()
-    tail_k_values = [int(v.strip()) for v in str(args.calibration_tail_k).split(",") if v.strip()]
 
     if args.dataset_type == "ruler":
         if not args.data_root:
@@ -845,363 +809,350 @@ def main():
         deterministic=args.deterministic,
     )
 
-    model_obj = getattr(runner, "model", None) if args.attn_impl == "entropy_attn" else None
-    if model_obj is not None:
-        mark_last_layer_entropy_logger(model_obj)
-        set_temp_max_step(model_obj, args.max_step)
-        set_target_trim_ratio(model_obj, args.target_trim_ratio)
+    if args.attn_impl == "entropy_attn":
+        model_obj = getattr(runner, "model", None)
+        if model_obj is not None:
+            mark_last_layer_entropy_logger(model_obj)
+            set_temp_max_step(model_obj, args.max_step)
+            set_target_trim_ratio(model_obj, args.target_trim_ratio)
+            set_calibration_tail_k(model_obj, args.calibration_tail_k)
 
     tasks = [t.strip() for t in args.tasks.split(",") if t.strip()]
     out_dir = args.output_root
     os.makedirs(out_dir, exist_ok=True)
 
-    ablation_summaries: Dict[int, Any] = {}
-    for tail_k in tail_k_values:
-        if model_obj is not None:
-            set_calibration_tail_k(model_obj, tail_k)
+    summary: Dict[str, Any] = {}
+    pred_times_s: List[float] = []
+    pred_time_state: Dict[str, int] = {"n": 0}
 
-        run_tag = args.run_tag if len(tail_k_values) == 1 else f"tailk{tail_k}_{args.run_tag}"
+    for task in tasks:
+        task_dir = os.path.join(out_dir, task)
+        os.makedirs(task_dir, exist_ok=True)
+        pred_path = os.path.join(task_dir, f"{task}_{args.attn_impl}_predictions_{args.run_tag}")
+        entropy_path = os.path.join(task_dir, f"{task}_{args.attn_impl}_entropy_log_{args.run_tag}")
+        session_summary_path = os.path.join(task_dir, f"{task}_{args.attn_impl}_session_summary_{args.run_tag}")
 
-        summary: Dict[str, Any] = {}
-        pred_times_s: List[float] = []
-        pred_time_state: Dict[str, int] = {"n": 0}
+        total = 0
+        hit_contains = 0
+        hit_exact = 0
+        hit_ruler = 0
+        hit_ruler_all = 0
+        session_summaries: List[Dict[str, Any]] = []
 
-        print(f"\n=== calibration_tail_k={tail_k} ===\n")
-
-        for task in tasks:
-            task_dir = os.path.join(out_dir, task)
-            os.makedirs(task_dir, exist_ok=True)
-            pred_path = os.path.join(task_dir, f"{task}_{args.attn_impl}_predictions_{run_tag}")
-            entropy_path = os.path.join(task_dir, f"{task}_{args.attn_impl}_entropy_log_{run_tag}")
-            session_summary_path = os.path.join(task_dir, f"{task}_{args.attn_impl}_session_summary_{run_tag}")
-
-            total = 0
-            hit_contains = 0
-            hit_exact = 0
-            hit_ruler = 0
-            hit_ruler_all = 0
-            session_summaries: List[Dict[str, Any]] = []
-
-            if args.dataset_type == "ruler":
-                examples = task_examples_from_ruler(task, args.data_root)
+        if args.dataset_type == "ruler":
+            examples = task_examples_from_ruler(task, args.data_root)
+        else:
+            if args.source == "hf":
+                examples = task_examples_from_hf(task)
             else:
-                if args.source == "hf":
-                    examples = task_examples_from_hf(task)
-                else:
-                    examples = task_examples_from_local(task, args.local_root)
+                examples = task_examples_from_local(task, args.local_root)
 
-            entropy_ctx = open(entropy_path, "w", encoding="utf-8") if args.attn_impl == "entropy_attn" else nullcontext(None)
-            with open(pred_path, "w", encoding="utf-8") as out_f, entropy_ctx as ent_f:
-                sessions = batched_sessions(examples, max(1, args.session_size), args.max_examples)
-                for session_idx, session_examples in enumerate(sessions):
-                    session_hit_contains = 0
-                    session_hit_exact = 0
-                    session_hit_ruler = 0
-                    session_hit_ruler_all = 0
-                    session_n = 0
-                    session_target_init = None
-                    session_temp_init = None
-                    session_ema_init = None
+        entropy_ctx = open(entropy_path, "w", encoding="utf-8") if args.attn_impl == "entropy_attn" else nullcontext(None)
+        with open(pred_path, "w", encoding="utf-8") as out_f, entropy_ctx as ent_f:
+            sessions = batched_sessions(examples, max(1, args.session_size), args.max_examples)
+            for session_idx, session_examples in enumerate(sessions):
+                session_hit_contains = 0
+                session_hit_exact = 0
+                session_hit_ruler = 0
+                session_hit_ruler_all = 0
+                session_n = 0
+                session_target_init = None
+                session_temp_init = None
+                session_ema_init = None
 
-                    if args.attn_impl == "entropy_attn":
-                        # Hard reset at every new session boundary.
-                        reset_entropy_controller_state(runner.model)
-                        reset_entropy_logs(runner.model)
+                if args.attn_impl == "entropy_attn":
+                    # Hard reset at every new session boundary.
+                    reset_entropy_controller_state(runner.model)
+                    reset_entropy_logs(runner.model)
 
-                        if args.session_init_mode != "legacy":
-                            # Session calibration using first K prompts, to avoid anchoring to only sample 1.
-                            K = max(0, min(args.session_calibration_samples, len(session_examples)))
-                            target_vals: List[float] = []
-                            n_mods = len(get_attn_modules(runner.model))
-                            per_mod_samples: List[List[torch.Tensor]] = [[] for _ in range(n_mods)]
+                    if args.session_init_mode != "legacy":
+                        # Session calibration using first K prompts, to avoid anchoring to only sample 1.
+                        K = max(0, min(args.session_calibration_samples, len(session_examples)))
+                        target_vals: List[float] = []
+                        n_mods = len(get_attn_modules(runner.model))
+                        per_mod_samples: List[List[torch.Tensor]] = [[] for _ in range(n_mods)]
 
-                            for ex_cal in session_examples[:K]:
-                                ex_cal_u = adapt_example(
-                                    ex_cal,
-                                    args.dataset_type,
-                                    ruler_append_answer_prefix=args.ruler_append_answer_prefix,
+                        for ex_cal in session_examples[:K]:
+                            ex_cal_u = adapt_example(
+                                ex_cal,
+                                args.dataset_type,
+                                ruler_append_answer_prefix=args.ruler_append_answer_prefix,
+                            )
+                            prompt_cal = build_prompt(runner, ex_cal_u, args.prompt_style)
+                            tokenized_cal = runner.tokenizer(prompt_cal, add_special_tokens=False)
+                            prompt_ids_cal = tokenized_cal["input_ids"]
+                            limit_cal = args.max_input_tokens if args.max_input_tokens > 0 else infer_model_input_limit(runner, args.max_new_tokens)
+                            if len(prompt_ids_cal) > limit_cal:
+                                if args.overlength_policy == "skip":
+                                    continue
+                                if args.overlength_policy == "error":
+                                    continue
+                                kept_cal = truncate_token_ids(
+                                    prompt_ids_cal,
+                                    limit=limit_cal,
+                                    strategy=args.truncate_strategy,
+                                    head_keep_ratio=args.head_keep_ratio,
                                 )
-                                prompt_cal = build_prompt(runner, ex_cal_u, args.prompt_style)
-                                tokenized_cal = runner.tokenizer(prompt_cal, add_special_tokens=False)
-                                prompt_ids_cal = tokenized_cal["input_ids"]
-                                limit_cal = args.max_input_tokens if args.max_input_tokens > 0 else infer_model_input_limit(runner, args.max_new_tokens)
-                                if len(prompt_ids_cal) > limit_cal:
-                                    if args.overlength_policy == "skip":
-                                        continue
-                                    if args.overlength_policy == "error":
-                                        continue
-                                    kept_cal = truncate_token_ids(
-                                        prompt_ids_cal,
-                                        limit=limit_cal,
-                                        strategy=args.truncate_strategy,
-                                        head_keep_ratio=args.head_keep_ratio,
-                                    )
-                                    prompt_cal = runner.tokenizer.decode(kept_cal, skip_special_tokens=False)
-
-                                reset_entropy_controller_state(runner.model)
-                                run_prefill_probe(runner, prompt_cal)
-                                tmean = collect_prompt_target_mean(runner.model)
-                                if tmean is not None:
-                                    target_vals.append(float(tmean))
-                                if args.session_init_mode == "calibrated_per_head":
-                                    per_mod_targets = collect_prompt_targets_by_module(runner.model)
-                                    for mi, tgt in enumerate(per_mod_targets):
-                                        if tgt is not None:
-                                            per_mod_samples[mi].append(tgt.detach().clone())
-
-                            if target_vals:
-                                if args.session_target_stat == "mean":
-                                    session_target_init = sum(target_vals) / len(target_vals)
-                                else:
-                                    sv = sorted(target_vals)
-                                    session_target_init = sv[len(sv) // 2]
-                            else:
-                                session_target_init = 0.5
-
-                            session_temp_init = float(args.session_temp_init) - float(args.session_temp_target_gain) * (session_target_init - 0.5)
-                            session_temp_init = max(0.7, min(1.0, session_temp_init))
-                            session_ema_init = 0.0 if args.session_ema_init_mode == "zero" else float(session_target_init)
-
-                            per_module_targets = None
-                            if args.session_init_mode == "calibrated_per_head":
-                                per_module_targets = []
-                                for mi, m in enumerate(get_attn_modules(runner.model)):
-                                    samples = per_mod_samples[mi] if mi < len(per_mod_samples) else []
-                                    if samples:
-                                        per_module_targets.append(aggregate_target_tensors(samples, args.session_target_stat))
-                                    else:
-                                        n_heads = infer_module_num_heads(m)
-                                        fallback = torch.full((1, n_heads, 1), float(session_target_init))
-                                        per_module_targets.append(fallback)
+                                prompt_cal = runner.tokenizer.decode(kept_cal, skip_special_tokens=False)
 
                             reset_entropy_controller_state(runner.model)
-                            initialize_entropy_controller_state(
-                                runner.model,
-                                temp_init=float(session_temp_init),
-                                ema_init=float(session_ema_init),
-                                target_init=float(session_target_init),
-                                per_module_targets=per_module_targets,
-                                ema_init_mode=args.session_ema_init_mode,
+                            run_prefill_probe(runner, prompt_cal)
+                            tmean = collect_prompt_target_mean(runner.model)
+                            if tmean is not None:
+                                target_vals.append(float(tmean))
+                            if args.session_init_mode == "calibrated_per_head":
+                                per_mod_targets = collect_prompt_targets_by_module(runner.model)
+                                for mi, tgt in enumerate(per_mod_targets):
+                                    if tgt is not None:
+                                        per_mod_samples[mi].append(tgt.detach().clone())
+
+                        if target_vals:
+                            if args.session_target_stat == "mean":
+                                session_target_init = sum(target_vals) / len(target_vals)
+                            else:
+                                sv = sorted(target_vals)
+                                session_target_init = sv[len(sv) // 2]
+                        else:
+                            session_target_init = 0.5
+
+                        session_temp_init = float(args.session_temp_init) - float(args.session_temp_target_gain) * (session_target_init - 0.5)
+                        session_temp_init = max(0.7, min(1.0, session_temp_init))
+                        session_ema_init = 0.0 if args.session_ema_init_mode == "zero" else float(session_target_init)
+
+                        per_module_targets = None
+                        if args.session_init_mode == "calibrated_per_head":
+                            per_module_targets = []
+                            for mi, m in enumerate(get_attn_modules(runner.model)):
+                                samples = per_mod_samples[mi] if mi < len(per_mod_samples) else []
+                                if samples:
+                                    per_module_targets.append(aggregate_target_tensors(samples, args.session_target_stat))
+                                else:
+                                    n_heads = infer_module_num_heads(m)
+                                    fallback = torch.full((1, n_heads, 1), float(session_target_init))
+                                    per_module_targets.append(fallback)
+
+                        reset_entropy_controller_state(runner.model)
+                        initialize_entropy_controller_state(
+                            runner.model,
+                            temp_init=float(session_temp_init),
+                            ema_init=float(session_ema_init),
+                            target_init=float(session_target_init),
+                            per_module_targets=per_module_targets,
+                            ema_init_mode=args.session_ema_init_mode,
+                        )
+
+                for ex in session_examples:
+                    ex_u = adapt_example(
+                        ex,
+                        args.dataset_type,
+                        ruler_append_answer_prefix=args.ruler_append_answer_prefix,
+                    )
+                    prompt = build_prompt(runner, ex_u, args.prompt_style)
+                    tokenized = runner.tokenizer(prompt, add_special_tokens=False)
+                    prompt_ids = tokenized["input_ids"]
+                    n_prompt_tokens = len(prompt_ids)
+                    model_input_limit = (
+                        args.max_input_tokens
+                        if args.max_input_tokens > 0
+                        else infer_model_input_limit(runner, args.max_new_tokens)
+                    )
+
+                    if n_prompt_tokens > model_input_limit:
+                        ex_id = ex_u.get("id", str(total))
+                        if args.overlength_policy == "error":
+                            raise ValueError(
+                                f"[{task}] example {ex_id} has {n_prompt_tokens} prompt tokens, "
+                                f"exceeds limit {model_input_limit}. "
+                                "Use --overlength_policy skip|truncate or set --max_input_tokens."
                             )
-
-                    for ex in session_examples:
-                        ex_u = adapt_example(
-                            ex,
-                            args.dataset_type,
-                            ruler_append_answer_prefix=args.ruler_append_answer_prefix,
-                        )
-                        prompt = build_prompt(runner, ex_u, args.prompt_style)
-                        tokenized = runner.tokenizer(prompt, add_special_tokens=False)
-                        prompt_ids = tokenized["input_ids"]
-                        n_prompt_tokens = len(prompt_ids)
-                        model_input_limit = (
-                            args.max_input_tokens
-                            if args.max_input_tokens > 0
-                            else infer_model_input_limit(runner, args.max_new_tokens)
-                        )
-
-                        if n_prompt_tokens > model_input_limit:
-                            ex_id = ex_u.get("id", str(total))
-                            if args.overlength_policy == "error":
-                                raise ValueError(
-                                    f"[{task}] example {ex_id} has {n_prompt_tokens} prompt tokens, "
-                                    f"exceeds limit {model_input_limit}. "
-                                    "Use --overlength_policy skip|truncate or set --max_input_tokens."
-                                )
-                            if args.overlength_policy == "skip":
-                                out_f.write(
-                                    json.dumps(
-                                        {
-                                            "task": task,
-                                            "id": ex_id,
-                                            "input": ex_u.get("input", ""),
-                                            "answers": ex_u.get("answer", []),
-                                            "prediction": "",
-                                            "_skipped_overlength": True,
-                                            "_prompt_tokens": n_prompt_tokens,
-                                            "_prompt_token_limit": model_input_limit,
-                                            "_session_idx": session_idx,
-                                        },
-                                        ensure_ascii=False,
-                                    )
-                                    + "\n"
-                                )
-                                continue
-
-                            kept = truncate_token_ids(
-                                prompt_ids,
-                                limit=model_input_limit,
-                                strategy=args.truncate_strategy,
-                                head_keep_ratio=args.head_keep_ratio,
-                            )
-                            prompt = runner.tokenizer.decode(kept, skip_special_tokens=False)
-                            n_prompt_tokens = model_input_limit
-
-                        if args.attn_impl == "entropy_attn":
-                            reset_entropy_logs(runner.model)
-
-                        pred = _cuda_time_call(
-                            lambda: runner.generate_one(
-                                prompt,
-                                max_new_tokens=args.max_new_tokens,
-                                stop_on_newline=(not args.multiline),
-                            ),
-                            enabled=args.time,
-                            state=pred_time_state,
-                            skip=args.time_skip,
-                            times=pred_times_s,
-                        )
-
-                        golds = ex_u.get("answer", []) or []
-                        if isinstance(golds, str):
-                            golds = [golds]
-
-                        # Always compute all metrics; metric_mode only controls status logging emphasis.
-                        r_hit = ruler_hit(pred, list(golds))
-                        ra_hit = ruler_hit_all(pred, list(golds))
-                        c_hit = contains_any(pred, list(golds))
-                        e_hit = exact_any(pred, list(golds))
-
-                        hit_ruler += r_hit
-                        hit_ruler_all += ra_hit
-                        hit_contains += c_hit
-                        hit_exact += e_hit
-                        session_hit_ruler += r_hit
-                        session_hit_ruler_all += ra_hit
-                        session_hit_contains += c_hit
-                        session_hit_exact += e_hit
-                        total += 1
-                        session_n += 1
-
-                        entropy_logs = collect_entropy_logs(runner.model) if args.attn_impl == "entropy_attn" else None
-                        if ent_f is not None and entropy_logs is not None:
-                            ex_id = ex_u.get("id", str(total - 1))
-                            ent_f.write(
+                        if args.overlength_policy == "skip":
+                            out_f.write(
                                 json.dumps(
                                     {
                                         "task": task,
-                                        "attn_impl": args.attn_impl,
-                                        "example_id": ex_id,
-                                        "session_idx": session_idx,
-                                        "prompt_target_mean": collect_prompt_target_mean(runner.model),
-                                        "entropy_log": entropy_logs,
+                                        "id": ex_id,
+                                        "input": ex_u.get("input", ""),
+                                        "answers": ex_u.get("answer", []),
+                                        "prediction": "",
+                                        "_skipped_overlength": True,
+                                        "_prompt_tokens": n_prompt_tokens,
+                                        "_prompt_token_limit": model_input_limit,
+                                        "_session_idx": session_idx,
                                     },
                                     ensure_ascii=False,
                                 )
                                 + "\n"
                             )
+                            continue
 
-                        if args.compact:
-                            ex_out = compact_row_common(
-                                task=task,
-                                ex_u=ex_u,
-                                prompt=prompt,
-                                pred=pred,
-                                session_idx=session_idx,
-                                c_hit=c_hit,
-                                e_hit=e_hit,
-                                r_hit=r_hit,
-                                ra_hit=ra_hit,
-                            )
-                        else:
-                            ex_out = {
-                                "task": task,
-                                "id": ex_u.get("id", str(total - 1)),
-                                # "input": ex_u.get("input", ""),
-                                "answers": list(golds),
-                                "prediction": pred,
-                                "_session_idx": session_idx,
-                                "_prompt_tokens": n_prompt_tokens,
-                                "_prompt_token_limit": model_input_limit,
-                                "_truncate_strategy": args.truncate_strategy,
-                                "_contains_hit": bool(c_hit),
-                                "_exact_hit": bool(e_hit),
-                                "_ruler_part_hit": bool(r_hit),
-                                "_ruler_all_hit": round(ra_hit, 4),
-                            }
-                            if args.dataset_type == "ruler":
-                                ex_out["outputs"] = list(golds)
-                        out_f.write(json.dumps(ex_out, ensure_ascii=False) + "\n")
+                        kept = truncate_token_ids(
+                            prompt_ids,
+                            limit=model_input_limit,
+                            strategy=args.truncate_strategy,
+                            head_keep_ratio=args.head_keep_ratio,
+                        )
+                        prompt = runner.tokenizer.decode(kept, skip_special_tokens=False)
+                        n_prompt_tokens = model_input_limit
 
-                        if args.status_every > 0 and (total % args.status_every == 0):
-                            if args.metric_mode == "ruler_part":
-                                r_acc = 100.0 * hit_ruler / max(total, 1)
-                                ra_acc = 100.0 * hit_ruler_all / max(total, 1)
-                                print(f"[{task}] {total} done | ruler_part={r_acc:.2f}% | ruler_all={ra_acc:.2f}%")
-                            elif args.metric_mode == "contains_exact":
-                                c_acc = 100.0 * hit_contains / max(total, 1)
-                                e_acc = 100.0 * hit_exact / max(total, 1)
-                                print(
-                                    f"[{task}] {total} done | contains={c_acc:.2f}% ({hit_contains}/{total}) "
-                                    f"| exact={e_acc:.2f}% ({hit_exact}/{total})"
-                                )
-                            else:
-                                r_acc = 100.0 * hit_ruler / max(total, 1)
-                                ra_acc = 100.0 * hit_ruler_all / max(total, 1)
-                                c_acc = 100.0 * hit_contains / max(total, 1)
-                                e_acc = 100.0 * hit_exact / max(total, 1)
-                                print(
-                                    f"[{task}] {total} done | ruler_part={r_acc:.2f}% ({hit_ruler}/{total}) "
-                                    f"| ruler_all={ra_acc:.2f}% "
-                                    f"| contains={c_acc:.2f}% ({hit_contains}/{total}) "
-                                    f"| exact={e_acc:.2f}% ({hit_exact}/{total})"
-                                )
-
-                    session_summary = {
-                        "task": task,
-                        "session_idx": session_idx,
-                        "session_init_mode": args.session_init_mode,
-                        "session_size": len(session_examples),
-                        "evaluated_n": session_n,
-                        "contains_acc": round(100.0 * session_hit_contains / max(session_n, 1), 2),
-                        "exact_acc": round(100.0 * session_hit_exact / max(session_n, 1), 2),
-                        "ruler_part_acc": round(100.0 * session_hit_ruler / max(session_n, 1), 2),
-                        "ruler_all_acc": round(100.0 * session_hit_ruler_all / max(session_n, 1), 2),
-                    }
                     if args.attn_impl == "entropy_attn":
-                        session_summary["session_target_init"] = float(session_target_init) if session_target_init is not None else None
-                        session_summary["session_ema_init"] = float(session_ema_init) if session_ema_init is not None else None
-                        session_summary["session_temp_init"] = float(session_temp_init) if session_temp_init is not None else None
-                    session_summaries.append(session_summary)
-                    print(
-                        f"[{task}] session {session_idx} | n={session_n} | "
-                        f"ruler_part={session_summary['ruler_part_acc']:.2f}% | "
-                        f"ruler_all={session_summary['ruler_all_acc']:.2f}% | "
-                        f"contains={session_summary['contains_acc']:.2f}% | "
-                        f"exact={session_summary['exact_acc']:.2f}%"
+                        reset_entropy_logs(runner.model)
+
+                    pred = _cuda_time_call(
+                        lambda: runner.generate_one(
+                            prompt,
+                            max_new_tokens=args.max_new_tokens,
+                            stop_on_newline=(not args.multiline),
+                        ),
+                        enabled=args.time,
+                        state=pred_time_state,
+                        skip=args.time_skip,
+                        times=pred_times_s,
                     )
 
-            with open(session_summary_path, "w", encoding="utf-8") as sf:
-                for row in session_summaries:
-                    sf.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    golds = ex_u.get("answer", []) or []
+                    if isinstance(golds, str):
+                        golds = [golds]
 
-            task_summary: Dict[str, Any] = {
-                "n": total,
-                "contains_acc": round(100.0 * hit_contains / max(total, 1), 2),
-                "exact_acc": round(100.0 * hit_exact / max(total, 1), 2),
-                "ruler_part_acc": round(100.0 * hit_ruler / max(total, 1), 2),
-                "ruler_all_acc": round(100.0 * hit_ruler_all / max(total, 1), 2),
-                "prediction_file": pred_path,
-                "session_summary_file": session_summary_path,
-                "num_sessions": len(session_summaries),
-            }
-            if args.time:
-                task_summary["pred_time"] = _summarize_times(pred_times_s)
-            summary[task] = task_summary
+                    # Always compute all metrics; metric_mode only controls status logging emphasis.
+                    r_hit = ruler_hit(pred, list(golds))
+                    ra_hit = ruler_hit_all(pred, list(golds))
+                    c_hit = contains_any(pred, list(golds))
+                    e_hit = exact_any(pred, list(golds))
 
-        final_report = {"config": vars(args), "calibration_tail_k": tail_k, "summary": summary}
-        summary_path = os.path.join(out_dir, f"{args.dataset_type}_summary_{args.attn_impl}_{run_tag}.json")
-        with open(summary_path, "w", encoding="utf-8") as sf:
-            json.dump(final_report, sf, indent=2, ensure_ascii=False)
-        print(json.dumps(final_report, indent=2, ensure_ascii=False))
-        print(f"[saved] summary: {summary_path}")
-        ablation_summaries[tail_k] = summary
+                    hit_ruler += r_hit
+                    hit_ruler_all += ra_hit
+                    hit_contains += c_hit
+                    hit_exact += e_hit
+                    session_hit_ruler += r_hit
+                    session_hit_ruler_all += ra_hit
+                    session_hit_contains += c_hit
+                    session_hit_exact += e_hit
+                    total += 1
+                    session_n += 1
 
-    if len(tail_k_values) > 1:
-        print("\n=== Ablation Summary (tail_k → ruler_all_acc) ===")
-        for k, s in ablation_summaries.items():
-            per_task = {t: v.get("ruler_all_acc") for t, v in s.items()}
-            print(f"  tail_k={k}: {per_task}")
+                    entropy_logs = collect_entropy_logs(runner.model) if args.attn_impl == "entropy_attn" else None
+                    if ent_f is not None and entropy_logs is not None:
+                        ex_id = ex_u.get("id", str(total - 1))
+                        ent_f.write(
+                            json.dumps(
+                                {
+                                    "task": task,
+                                    "attn_impl": args.attn_impl,
+                                    "example_id": ex_id,
+                                    "session_idx": session_idx,
+                                    "prompt_target_mean": collect_prompt_target_mean(runner.model),
+                                    "entropy_log": entropy_logs,
+                                },
+                                ensure_ascii=False,
+                            )
+                            + "\n"
+                        )
+
+                    if args.compact:
+                        ex_out = compact_row_common(
+                            task=task,
+                            ex_u=ex_u,
+                            prompt=prompt,
+                            pred=pred,
+                            session_idx=session_idx,
+                            c_hit=c_hit,
+                            e_hit=e_hit,
+                            r_hit=r_hit,
+                            ra_hit=ra_hit,
+                        )
+                    else:
+                        ex_out = {
+                            "task": task,
+                            "id": ex_u.get("id", str(total - 1)),
+                            # "input": ex_u.get("input", ""),
+                            "answers": list(golds),
+                            "prediction": pred,
+                            "_session_idx": session_idx,
+                            "_prompt_tokens": n_prompt_tokens,
+                            "_prompt_token_limit": model_input_limit,
+                            "_truncate_strategy": args.truncate_strategy,
+                            "_contains_hit": bool(c_hit),
+                            "_exact_hit": bool(e_hit),
+                            "_ruler_part_hit": bool(r_hit),
+                            "_ruler_all_hit": bool(ra_hit),
+                        }
+                        if args.dataset_type == "ruler":
+                            ex_out["outputs"] = list(golds)
+                    out_f.write(json.dumps(ex_out, ensure_ascii=False) + "\n")
+
+                    if args.status_every > 0 and (total % args.status_every == 0):
+                        if args.metric_mode == "ruler_part":
+                            r_acc = 100.0 * hit_ruler / max(total, 1)
+                            ra_acc = 100.0 * hit_ruler_all / max(total, 1)
+                            print(f"[{task}] {total} done | ruler_part={r_acc:.2f}% | ruler_all={ra_acc:.2f}% ({hit_ruler_all}/{total})")
+                        elif args.metric_mode == "contains_exact":
+                            c_acc = 100.0 * hit_contains / max(total, 1)
+                            e_acc = 100.0 * hit_exact / max(total, 1)
+                            print(
+                                f"[{task}] {total} done | contains={c_acc:.2f}% ({hit_contains}/{total}) "
+                                f"| exact={e_acc:.2f}% ({hit_exact}/{total})"
+                            )
+                        else:
+                            r_acc = 100.0 * hit_ruler / max(total, 1)
+                            ra_acc = 100.0 * hit_ruler_all / max(total, 1)
+                            c_acc = 100.0 * hit_contains / max(total, 1)
+                            e_acc = 100.0 * hit_exact / max(total, 1)
+                            print(
+                                f"[{task}] {total} done | ruler_part={r_acc:.2f}% ({hit_ruler}/{total}) "
+                                f"| ruler_all={ra_acc:.2f}% ({hit_ruler_all}/{total}) "
+                                f"| contains={c_acc:.2f}% ({hit_contains}/{total}) "
+                                f"| exact={e_acc:.2f}% ({hit_exact}/{total})"
+                            )
+
+                session_summary = {
+                    "task": task,
+                    "session_idx": session_idx,
+                    "session_init_mode": args.session_init_mode,
+                    "session_size": len(session_examples),
+                    "evaluated_n": session_n,
+                    "contains_acc": round(100.0 * session_hit_contains / max(session_n, 1), 2),
+                    "exact_acc": round(100.0 * session_hit_exact / max(session_n, 1), 2),
+                    "ruler_part_acc": round(100.0 * session_hit_ruler / max(session_n, 1), 2),
+                    "ruler_all_acc": round(100.0 * session_hit_ruler_all / max(session_n, 1), 2),
+                }
+                if args.attn_impl == "entropy_attn":
+                    session_summary["session_target_init"] = float(session_target_init) if session_target_init is not None else None
+                    session_summary["session_ema_init"] = float(session_ema_init) if session_ema_init is not None else None
+                    session_summary["session_temp_init"] = float(session_temp_init) if session_temp_init is not None else None
+                session_summaries.append(session_summary)
+                print(
+                    f"[{task}] session {session_idx} | n={session_n} | "
+                    f"ruler_part={session_summary['ruler_part_acc']:.2f}% | "
+                    f"ruler_all={session_summary['ruler_all_acc']:.2f}% | "
+                    f"contains={session_summary['contains_acc']:.2f}% | "
+                    f"exact={session_summary['exact_acc']:.2f}%"
+                )
+
+        with open(session_summary_path, "w", encoding="utf-8") as sf:
+            for row in session_summaries:
+                sf.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+        task_summary: Dict[str, Any] = {
+            "n": total,
+            "contains_acc": round(100.0 * hit_contains / max(total, 1), 2),
+            "exact_acc": round(100.0 * hit_exact / max(total, 1), 2),
+            "ruler_part_acc": round(100.0 * hit_ruler / max(total, 1), 2),
+            "ruler_all_acc": round(100.0 * hit_ruler_all / max(total, 1), 2),
+            "prediction_file": pred_path,
+            "session_summary_file": session_summary_path,
+            "num_sessions": len(session_summaries),
+        }
+        if args.time:
+            task_summary["pred_time"] = _summarize_times(pred_times_s)
+        summary[task] = task_summary
+
+    final_report = {"config": vars(args), "summary": summary}
+    summary_path = os.path.join(out_dir, f"{args.dataset_type}_summary_{args.attn_impl}_{args.run_tag}.json")
+    with open(summary_path, "w", encoding="utf-8") as sf:
+        json.dump(final_report, sf, indent=2, ensure_ascii=False)
+
+    print(json.dumps(final_report, indent=2, ensure_ascii=False))
+    print(f"[saved] summary: {summary_path}")
 
 
 if __name__ == "__main__":
