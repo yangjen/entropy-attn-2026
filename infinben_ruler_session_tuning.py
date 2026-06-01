@@ -26,7 +26,7 @@ CUDA_VISIBLE_DEVICES=0 python /c2/jenny/r3/entropy-attn-2026/infinitebench_tunin
   --max_input_tokens 33000 \
   --overlength_policy truncate \
   --truncate_strategy head_tail \
-  --run_tag tuning_sessions_testing_40.jsonl
+  --run_tag tuning_sessions_testing_40
 
   --model gradientai/Llama-3-8B-Instruct-262k \
   --model meta-llama/Llama-3.1-8B-Instruct \
@@ -34,10 +34,10 @@ CUDA_VISIBLE_DEVICES=0 python /c2/jenny/r3/entropy-attn-2026/infinitebench_tunin
   
 Ruler:
 CUDA_VISIBLE_DEVICES=0 python /c2/jenny/r3/entropy-attn-2026/infinben_ruler_session_tuning.py \
-  --model gradientai/Llama-3-8B-Instruct-262k \
+  --model meta-llama/Llama-3.1-8B-Instruct \
   --dataset_type ruler \
-  --data_root /c2/jenny/r3/RULER_outputs/llama3.1-8b-chat/synthetic/131072/data \
-  --tasks cwe,fwe \
+  --data_root /c2/jenny/r3/RULER_outputs/llama3.1-8b-chat/synthetic/32768/data \
+  --tasks fwe \
   --max_examples 0 \
   --session_size 50 \
   --session_init_mode calibrated_per_head \
@@ -50,7 +50,7 @@ CUDA_VISIBLE_DEVICES=0 python /c2/jenny/r3/entropy-attn-2026/infinben_ruler_sess
   --target_trim_ratio 0.10 \
   --prompt_style ruler_raw \
   --metric_mode both \
-  --output_root /c2/jenny/r3/RULER_outputs/llama3.1-8b-chat/synthetic/131072/data_session_runs \
+  --output_root /c2/jenny/r3/RULER_outputs/llama3.1-8b-chat/synthetic/32768/data_session_runs \
   --attn_impl entropy_attn \
   --dtype bf16 \
   --compact \
@@ -59,7 +59,7 @@ CUDA_VISIBLE_DEVICES=0 python /c2/jenny/r3/entropy-attn-2026/infinben_ruler_sess
   --time --time_skip 4 \
   --multiline \
   --ruler_append_answer_prefix \
-  --run_tag 50session_3cali_prefixON_0p7ema_YaRN.jsonl
+  --run_tag 50session_3cali_prefixON_0p7ema
 ------------------------------------
   
   --max_input_tokens 33000 \
@@ -86,11 +86,11 @@ CUDA_VISIBLE_DEVICES=3 python /c2/jenny/r3/entropy-attn-2026/infinitebench_tunin
   --run_tag session_baseline_sdpa.jsonl
 
 Ruler:
-CUDA_VISIBLE_DEVICES=3 python /c2/jenny/r3/entropy-attn-2026/infinben_ruler_session_tuning.py \
-  --model gradientai/Llama-3-8B-Instruct-262k \
+CUDA_VISIBLE_DEVICES=0 python /c2/jenny/r3/entropy-attn-2026/infinben_ruler_session_tuning.py \
+  --model meta-llama/Llama-3.1-8B-Instruct \
   --dataset_type ruler \
   --data_root /c2/jenny/r3/RULER_outputs/llama3.1-8b-chat/synthetic/131072/data \
-  --tasks qa_1 \
+  --tasks cwe,fwe \
   --max_examples 0 \
   --prompt_style ruler_raw \
   --metric_mode both \
@@ -103,7 +103,7 @@ CUDA_VISIBLE_DEVICES=3 python /c2/jenny/r3/entropy-attn-2026/infinben_ruler_sess
   --time --time_skip 4 \
   --multiline \
   --ruler_append_answer_prefix \
-  --run_tag baseline_no_session_prefixON.jsonl
+  --run_tag baseline_no_session_prefixON_128k_cwefwe
 ------------------------------------
   --max_input_tokens 33000 \
   --overlength_policy truncate \
@@ -131,12 +131,13 @@ CUDA_VISIBLE_DEVICES=3 python /c2/jenny/r3/entropy-attn-2026/infinben_ruler_sess
   --attn_impl entropy_attn \
   --dtype bf16 \
   --compact \
-  --max_new_tokens 128 \
+  --max_new_tokens 64 \
   --deterministic \
   --time --time_skip 4 \
   --multiline \
   --ruler_append_answer_prefix \
-  --run_tag entropy_attn_baseline_no_session_prefixON.jsonl
+  --run_tag baseline_no_session_prefixON_32k_fixedtemp_0p95_cwefwe
+
 """
 
 import argparse
@@ -461,8 +462,8 @@ def initialize_entropy_controller_state(
         m._entropy_temp_controller = c
 
 
-def batched_sessions(examples: Iterable[Dict[str, Any]], session_size: int, max_examples: int):
-    buf: List[Dict[str, Any]] = []
+def batched_sessions(examples: Iterable, session_size: int, max_examples: int):
+    buf = []
     seen = 0
     for ex in examples:
         if max_examples > 0 and seen >= max_examples:
@@ -474,6 +475,60 @@ def batched_sessions(examples: Iterable[Dict[str, Any]], session_size: int, max_
             buf = []
     if buf:
         yield buf
+
+
+def iter_preprocessed_examples(examples: Iterable[Dict[str, Any]], runner, args, task: str = "", out_f=None):
+    """Tokenize and apply overlength policy before session batching.
+
+    Yields (ex_u, prompt, n_prompt_tokens) for every example that passes the filter.
+    Skipped examples (overlength_policy==skip) are written to out_f with _session_idx=-1
+    and excluded from session counts.
+    """
+    limit = args.max_input_tokens if args.max_input_tokens > 0 else infer_model_input_limit(runner, args.max_new_tokens)
+    for ex in examples:
+        ex_u = adapt_example(ex, args.dataset_type, ruler_append_answer_prefix=args.ruler_append_answer_prefix)
+        prompt = build_prompt(runner, ex_u, args.prompt_style)
+        prompt_ids = runner.tokenizer(prompt, add_special_tokens=False)["input_ids"]
+        n_tokens = len(prompt_ids)
+
+        if n_tokens > limit:
+            ex_id = ex_u.get("id", "")
+            if args.overlength_policy == "error":
+                raise ValueError(
+                    f"[{task}] example {ex_id} has {n_tokens} prompt tokens, "
+                    f"exceeds limit {limit}. "
+                    "Use --overlength_policy skip|truncate or set --max_input_tokens."
+                )
+            if args.overlength_policy == "skip":
+                if out_f is not None:
+                    out_f.write(
+                        json.dumps(
+                            {
+                                "task": task,
+                                "id": ex_id,
+                                "input": ex_u.get("input", ""),
+                                "answers": ex_u.get("answer", []),
+                                "prediction": "",
+                                "_skipped_overlength": True,
+                                "_prompt_tokens": n_tokens,
+                                "_prompt_token_limit": limit,
+                                "_session_idx": -1,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+                continue
+            kept = truncate_token_ids(
+                prompt_ids,
+                limit=limit,
+                strategy=args.truncate_strategy,
+                head_keep_ratio=args.head_keep_ratio,
+            )
+            prompt = runner.tokenizer.decode(kept, skip_special_tokens=False)
+            n_tokens = limit
+
+        yield (ex_u, prompt, n_tokens)
 
 
 def normalize_text(s: str) -> str:
@@ -892,7 +947,8 @@ def main():
 
             entropy_ctx = open(entropy_path, "w", encoding="utf-8") if args.attn_impl == "entropy_attn" else nullcontext(None)
             with open(pred_path, "w", encoding="utf-8") as out_f, entropy_ctx as ent_f:
-                sessions = batched_sessions(examples, max(1, args.session_size), args.max_examples)
+                preprocessed = iter_preprocessed_examples(examples, runner, args, task=task, out_f=out_f)
+                sessions = batched_sessions(preprocessed, max(1, args.session_size), args.max_examples)
                 for session_idx, session_examples in enumerate(sessions):
                     session_hit_contains = 0
                     session_hit_exact = 0
@@ -915,29 +971,7 @@ def main():
                             n_mods = len(get_attn_modules(runner.model))
                             per_mod_samples: List[List[torch.Tensor]] = [[] for _ in range(n_mods)]
 
-                            for ex_cal in session_examples[:K]:
-                                ex_cal_u = adapt_example(
-                                    ex_cal,
-                                    args.dataset_type,
-                                    ruler_append_answer_prefix=args.ruler_append_answer_prefix,
-                                )
-                                prompt_cal = build_prompt(runner, ex_cal_u, args.prompt_style)
-                                tokenized_cal = runner.tokenizer(prompt_cal, add_special_tokens=False)
-                                prompt_ids_cal = tokenized_cal["input_ids"]
-                                limit_cal = args.max_input_tokens if args.max_input_tokens > 0 else infer_model_input_limit(runner, args.max_new_tokens)
-                                if len(prompt_ids_cal) > limit_cal:
-                                    if args.overlength_policy == "skip":
-                                        continue
-                                    if args.overlength_policy == "error":
-                                        continue
-                                    kept_cal = truncate_token_ids(
-                                        prompt_ids_cal,
-                                        limit=limit_cal,
-                                        strategy=args.truncate_strategy,
-                                        head_keep_ratio=args.head_keep_ratio,
-                                    )
-                                    prompt_cal = runner.tokenizer.decode(kept_cal, skip_special_tokens=False)
-
+                            for (_, prompt_cal, _) in session_examples[:K]:
                                 reset_entropy_controller_state(runner.model)
                                 run_prefill_probe(runner, prompt_cal)
                                 tmean = collect_prompt_target_mean(runner.model)
@@ -984,59 +1018,12 @@ def main():
                                 ema_init_mode=args.session_ema_init_mode,
                             )
 
-                    for ex in session_examples:
-                        ex_u = adapt_example(
-                            ex,
-                            args.dataset_type,
-                            ruler_append_answer_prefix=args.ruler_append_answer_prefix,
-                        )
-                        prompt = build_prompt(runner, ex_u, args.prompt_style)
-                        tokenized = runner.tokenizer(prompt, add_special_tokens=False)
-                        prompt_ids = tokenized["input_ids"]
-                        n_prompt_tokens = len(prompt_ids)
-                        model_input_limit = (
-                            args.max_input_tokens
-                            if args.max_input_tokens > 0
-                            else infer_model_input_limit(runner, args.max_new_tokens)
-                        )
-
-                        if n_prompt_tokens > model_input_limit:
-                            ex_id = ex_u.get("id", str(total))
-                            if args.overlength_policy == "error":
-                                raise ValueError(
-                                    f"[{task}] example {ex_id} has {n_prompt_tokens} prompt tokens, "
-                                    f"exceeds limit {model_input_limit}. "
-                                    "Use --overlength_policy skip|truncate or set --max_input_tokens."
-                                )
-                            if args.overlength_policy == "skip":
-                                out_f.write(
-                                    json.dumps(
-                                        {
-                                            "task": task,
-                                            "id": ex_id,
-                                            "input": ex_u.get("input", ""),
-                                            "answers": ex_u.get("answer", []),
-                                            "prediction": "",
-                                            "_skipped_overlength": True,
-                                            "_prompt_tokens": n_prompt_tokens,
-                                            "_prompt_token_limit": model_input_limit,
-                                            "_session_idx": session_idx,
-                                        },
-                                        ensure_ascii=False,
-                                    )
-                                    + "\n"
-                                )
-                                continue
-
-                            kept = truncate_token_ids(
-                                prompt_ids,
-                                limit=model_input_limit,
-                                strategy=args.truncate_strategy,
-                                head_keep_ratio=args.head_keep_ratio,
-                            )
-                            prompt = runner.tokenizer.decode(kept, skip_special_tokens=False)
-                            n_prompt_tokens = model_input_limit
-
+                    model_input_limit = (
+                        args.max_input_tokens
+                        if args.max_input_tokens > 0
+                        else infer_model_input_limit(runner, args.max_new_tokens)
+                    )
+                    for (ex_u, prompt, n_prompt_tokens) in session_examples:
                         if args.attn_impl == "entropy_attn":
                             reset_entropy_logs(runner.model)
 

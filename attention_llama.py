@@ -61,6 +61,7 @@ class LlamaRunner:
         ).to(self.device)
 
         self.model.eval()
+        self.model.generation_config.max_length = None
         print(
             f"[LlamaRunner] attn_impl="
             f"{getattr(self.model.config, '_attn_implementation', None)} / "

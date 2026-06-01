@@ -56,8 +56,9 @@ CUDA_VISIBLE_DEVICES=0 python /c2/jenny/r3/entropy-attn-2026/mrcr_qwen35_session
   --deterministic \
   --target_trim_ratio 0.10 \
   --calibration_tail_k 256 \
+  --temp_max 1.2 \
   --output_root /c2/jenny/r3/MRCR_outputs/qwen35-2b \
-  --run_tag legacy_controller_32-64k.jsonl
+  --run_tag legacy_controller_32-64k_maxtemp1p2
 
 
   
@@ -435,8 +436,8 @@ def grade_mrcr(response: str, answer: str, random_string_to_prepend: str) -> flo
     return float(SequenceMatcher(None, response.strip(), answer.strip()).ratio())
 
 
-def batched_sessions(examples: Iterable[Dict[str, Any]], session_size: int, max_examples: int):
-    buf: List[Dict[str, Any]] = []
+def batched_sessions(examples: Iterable, session_size: int, max_examples: int):
+    buf = []
     seen = 0
     for ex in examples:
         if max_examples > 0 and seen >= max_examples:
@@ -448,6 +449,39 @@ def batched_sessions(examples: Iterable[Dict[str, Any]], session_size: int, max_
             buf = []
     if buf:
         yield buf
+
+
+def iter_preprocessed_examples(examples: Iterable[Dict[str, Any]], runner, args, task: str = "", out_f=None):
+    """Build prompt, apply overlength + token-window filters before session batching.
+
+    Yields (ex, prompt, trunc) for valid examples.
+    Skipped examples are excluded from session counts (written to out_f with session_idx=-1).
+    """
+    for ex in examples:
+        messages = parse_mrcr_messages(ex)
+        prompt = runner.messages_to_prompt(messages)
+        trunc = maybe_truncate_prompt(runner, prompt, args)
+        if trunc.get("skip"):
+            if out_f is not None:
+                out_f.write(
+                    json.dumps(
+                        {
+                            "task": task,
+                            "idx": ex.get("_idx"),
+                            "session_idx": -1,
+                            "prompt_tokens": trunc["prompt_tokens"],
+                            "prompt_token_limit": trunc["limit"],
+                            "_skipped_overlength": True,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+            continue
+        pt = trunc["prompt_tokens"]
+        if (args.min_tokens > 0 and pt < args.min_tokens) or (args.max_tokens > 0 and pt > args.max_tokens):
+            continue
+        yield (ex, trunc["prompt"], trunc)
 
 
 # ------------------------- token truncation -------------------------
@@ -606,7 +640,8 @@ def main():
         examples = load_mrcr_task(task, args.local_root)
         entropy_ctx = open(entropy_path, "w", encoding="utf-8") if args.attn_impl == "entropy_attn" else nullcontext(None)
         with open(pred_path, "w", encoding="utf-8") as out_f, open(session_path, "w", encoding="utf-8") as sess_f, entropy_ctx as ent_f:
-            for session_idx, session_examples in enumerate(batched_sessions(examples, max(1, args.session_size), args.max_examples)):
+            preprocessed = iter_preprocessed_examples(examples, runner, args, task=task, out_f=out_f)
+            for session_idx, session_examples in enumerate(batched_sessions(preprocessed, max(1, args.session_size), args.max_examples)):
                 session_target_init = None
                 session_temp_init = None
                 session_ema_init = None
@@ -621,16 +656,7 @@ def main():
                         n_mods = len(get_attn_modules(runner.model))
                         per_mod_samples: List[List[torch.Tensor]] = [[] for _ in range(n_mods)]
 
-                        for ex_cal in session_examples[:K]:
-                            messages = parse_mrcr_messages(ex_cal)
-                            prompt_cal = runner.messages_to_prompt(messages)
-                            trunc = maybe_truncate_prompt(runner, prompt_cal, args)
-                            if trunc.get("skip"):
-                                continue
-                            pt = trunc["prompt_tokens"]
-                            if (args.min_tokens > 0 and pt < args.min_tokens) or (args.max_tokens > 0 and pt > args.max_tokens):
-                                continue
-                            cal_prompt = trunc["prompt"]
+                        for (_, cal_prompt, _) in session_examples[:K]:
                             if args.calibration_max_tokens > 0:
                                 cal_ids = runner.tokenizer(cal_prompt, add_special_tokens=False)["input_ids"]
                                 if len(cal_ids) > args.calibration_max_tokens:
@@ -682,17 +708,7 @@ def main():
                 sess_prefix = 0
 
                 try:
-                  for ex in session_examples:
-                    messages = parse_mrcr_messages(ex)
-                    prompt = runner.messages_to_prompt(messages)
-                    trunc = maybe_truncate_prompt(runner, prompt, args)
-                    if trunc.get("skip"):
-                        continue
-                    pt = trunc["prompt_tokens"]
-                    if (args.min_tokens > 0 and pt < args.min_tokens) or (args.max_tokens > 0 and pt > args.max_tokens):
-                        continue
-                    prompt = trunc["prompt"]
-
+                  for (ex, prompt, trunc) in session_examples:
                     if args.attn_impl == "entropy_attn":
                         reset_entropy_logs(runner.model)
 
